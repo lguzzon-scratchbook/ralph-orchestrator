@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-01-20
+
+### Added
+
+- **TUI Iteration Architecture**: Refactored TUI to iteration-based model with snapshot testing
+  - Each iteration gets its own buffer for clean separation
+  - Iteration switcher (←/→ arrows) to review previous iterations
+  - Snapshot-based testing for TUI components
+
+### Fixed
+
+- **TUI Content Display**: Removed ellipsis truncation that was cutting off content mid-word
+  - Long lines now soft-wrap at viewport boundaries instead of being truncated with "..."
+- **TUI Autoscroll**: Content now autoscrolls to keep latest output visible
+- **TUI Artifacts**: Fixed viewport buffer clearing to prevent visual artifacts when switching iterations
+- **Markdown Boundaries**: Preserved line boundaries when rendering markdown content
+
 ## [2.0.0] - 2026-01-14
 
 ### Added
