@@ -116,7 +116,7 @@ Planner triggered → Next iteration starts
 
 1. **Manual test:**
    ```bash
-   cargo run --bin ralph -- run -i -c ralph.claude.yml -p "Create a hello world script"
+   cargo run --bin ralph -- run --tui -c ralph.claude.yml -p "Create a hello world script"
    ```
    - Let Claude complete the task
    - Stop interacting

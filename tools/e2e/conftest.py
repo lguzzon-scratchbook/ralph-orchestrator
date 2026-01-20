@@ -205,18 +205,18 @@ def create_iteration_test_config(
     Returns:
         Path to the created config file
     """
-    config_content = f"""
+    config_content = f"""# Ralph E2E test config
 cli:
   backend: claude
-  default_mode: autonomous
-  idle_timeout_secs: {idle_timeout_secs}
+  prompt_mode: arg
 
-orchestrator:
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
   max_iterations: {max_iterations}
   max_runtime_seconds: {max_runtime_seconds}
-  max_consecutive_failures: 5
+  idle_timeout_secs: {idle_timeout_secs}
 """
-    config_path = project_root / f"ralph.iteration-test.yml"
+    config_path = project_root / "ralph.iteration-test.yml"
     config_path.write_text(config_content)
     return config_path
 

@@ -1,20 +1,23 @@
 //! Main application loop for the TUI.
+//!
+//! This module provides a read-only observation dashboard that displays
+//! formatted output from the Ralph orchestrator, with iteration navigation,
+//! scroll, and search functionality.
 
-use crate::input::{Command, InputRouter, RouteResult};
-use crate::scroll::ScrollManager;
+use crate::input::{Action, map_key};
 use crate::state::TuiState;
-use crate::widgets::{footer, header, help, terminal::TerminalWidget};
+use crate::widgets::{content::ContentPane, footer, header, help};
 use anyhow::Result;
 use crossterm::{
     cursor::Show,
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
         KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ralph_adapters::pty_handle::PtyHandle;
+use futures::StreamExt;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -22,91 +25,91 @@ use ratatui::{
 };
 use scopeguard::defer;
 use std::io;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tokio::time::{Duration, interval};
+use tracing::info;
 
-/// Main TUI application.
+/// Dispatches an action to the TuiState.
+///
+/// Returns `true` if the action signals to quit the application.
+pub fn dispatch_action(action: Action, state: &mut TuiState, viewport_height: usize) -> bool {
+    match action {
+        Action::Quit => return true,
+        Action::ScrollDown => {
+            if let Some(buffer) = state.current_iteration_mut() {
+                buffer.scroll_down(viewport_height);
+            }
+        }
+        Action::ScrollUp => {
+            if let Some(buffer) = state.current_iteration_mut() {
+                buffer.scroll_up();
+            }
+        }
+        Action::ScrollTop => {
+            if let Some(buffer) = state.current_iteration_mut() {
+                buffer.scroll_top();
+            }
+        }
+        Action::ScrollBottom => {
+            if let Some(buffer) = state.current_iteration_mut() {
+                buffer.scroll_bottom(viewport_height);
+            }
+        }
+        Action::NextIteration => {
+            state.navigate_next();
+        }
+        Action::PrevIteration => {
+            state.navigate_prev();
+        }
+        Action::ShowHelp => {
+            state.show_help = true;
+        }
+        Action::DismissHelp => {
+            state.show_help = false;
+            state.clear_search();
+        }
+        Action::StartSearch => {
+            state.search_state.search_mode = true;
+        }
+        Action::SearchNext => {
+            state.next_match();
+        }
+        Action::SearchPrev => {
+            state.prev_match();
+        }
+        Action::None => {}
+    }
+    false
+}
+
+/// Main TUI application for read-only observation.
 pub struct App {
     state: Arc<Mutex<TuiState>>,
-    terminal_widget: Arc<Mutex<TerminalWidget>>,
-    input_router: InputRouter,
-    scroll_manager: ScrollManager,
-    input_tx: mpsc::UnboundedSender<Vec<u8>>,
-    control_tx: mpsc::UnboundedSender<ralph_adapters::pty_handle::ControlCommand>,
-    /// Atomic iteration counter for synchronizing the PTY output task.
-    /// Incremented when iteration boundaries are detected, allowing the
-    /// background task to skip orphaned bytes from previous iterations.
-    iteration_counter: Arc<AtomicU32>,
-    /// Receives notification when PTY process terminates.
-    /// Used to break the event loop and exit cleanly on double Ctrl+C.
+    /// Receives notification when the underlying process terminates.
+    /// This is the ONLY exit path for the TUI event loop (besides Action::Quit).
     terminated_rx: watch::Receiver<bool>,
+    /// Channel to signal main loop on Ctrl+C.
+    /// In raw terminal mode, SIGINT is not generated, so TUI must signal
+    /// the main orchestration loop through this channel.
+    interrupt_tx: Option<watch::Sender<bool>>,
 }
 
 impl App {
-    /// Creates a new App with shared state and PTY handle.
-    #[allow(dead_code)] // Public API - may be used by external callers
-    pub fn new(state: Arc<Mutex<TuiState>>, pty_handle: PtyHandle) -> Self {
-        Self::with_prefix(
-            state,
-            pty_handle,
-            KeyCode::Char('a'),
-            crossterm::event::KeyModifiers::CONTROL,
-        )
-    }
-
-    /// Creates a new App with custom prefix key.
-    pub fn with_prefix(
+    /// Creates a new App with shared state, termination signal, and optional interrupt channel.
+    pub fn new(
         state: Arc<Mutex<TuiState>>,
-        pty_handle: PtyHandle,
-        prefix_key: KeyCode,
-        prefix_modifiers: crossterm::event::KeyModifiers,
+        terminated_rx: watch::Receiver<bool>,
+        interrupt_tx: Option<watch::Sender<bool>>,
     ) -> Self {
-        let terminal_widget = Arc::new(Mutex::new(TerminalWidget::new()));
-        let iteration_counter = Arc::new(AtomicU32::new(0));
-
-        let PtyHandle {
-            mut output_rx,
-            input_tx,
-            control_tx,
-            terminated_rx,
-        } = pty_handle;
-
-        // Spawn task to read PTY output and feed to terminal widget.
-        // Uses iteration_counter to detect iteration boundaries and skip
-        // orphaned bytes from previous iterations, preventing rendering corruption.
-        let widget_clone = Arc::clone(&terminal_widget);
-        let iteration_for_task = Arc::clone(&iteration_counter);
-        tokio::spawn(async move {
-            let mut last_seen_iteration = 0;
-            while let Some(bytes) = output_rx.recv().await {
-                let current = iteration_for_task.load(Ordering::Acquire);
-                if current != last_seen_iteration {
-                    // Iteration boundary detected - skip orphaned bytes from old iteration
-                    last_seen_iteration = current;
-                    continue;
-                }
-                if let Ok(mut widget) = widget_clone.lock() {
-                    widget.process(&bytes);
-                }
-            }
-        });
-
         Self {
             state,
-            terminal_widget,
-            input_router: InputRouter::with_prefix(prefix_key, prefix_modifiers),
-            scroll_manager: ScrollManager::new(),
-            input_tx,
-            control_tx,
-            iteration_counter,
             terminated_rx,
+            interrupt_tx,
         }
     }
 
     /// Runs the TUI event loop.
-    #[allow(clippy::too_many_lines)]
     pub async fn run(mut self) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -123,215 +126,132 @@ impl App {
             let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, Show);
         }
 
-        let mut tick = interval(Duration::from_millis(100));
+        // Event-driven architecture: input polling is the primary driver
+        // Render is throttled to ~60fps via interval tick
+        let mut events = EventStream::new();
+        let mut render_tick = interval(Duration::from_millis(16));
 
-        // Track previous terminal size to detect changes
-        let mut last_terminal_size: Option<(u16, u16)> = None;
+        // Track viewport height for scroll calculations
+        let mut viewport_height: usize = 24; // Default, updated on render
 
         loop {
+            // Use biased select to prioritize input over render ticks
             tokio::select! {
-                _ = tick.tick() => {
-                    // Check for iteration change and clear terminal
-                    {
-                        let mut state = self.state.lock().unwrap();
-                        if state.iteration_changed() {
-                            state.prev_iteration = state.iteration;
-                            drop(state);
+                biased;
 
-                            // Signal iteration boundary to output task BEFORE clearing.
-                            // This ensures orphaned bytes from the old iteration are skipped.
-                            self.iteration_counter.fetch_add(1, Ordering::Release);
+                // Priority 1: Handle input events immediately for responsiveness
+                maybe_event = events.next() => {
+                    match maybe_event {
+                        Some(Ok(event)) => {
+                            match event {
+                                // Handle Ctrl+C: signal main loop and exit.
+                                // In raw mode, SIGINT is not generated, so we must signal the
+                                // main orchestration loop through interrupt_tx channel.
+                                Event::Key(key) if key.kind == KeyEventKind::Press
+                                    && key.code == KeyCode::Char('c')
+                                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
+                                    info!("Ctrl+C detected, signaling main loop");
+                                    if let Some(ref tx) = self.interrupt_tx {
+                                        let _ = tx.send(true);
+                                    }
+                                    break;
+                                }
+                                Event::Mouse(mouse) => {
+                                    match mouse.kind {
+                                        MouseEventKind::ScrollUp => {
+                                            let mut state = self.state.lock().unwrap();
+                                            if let Some(buffer) = state.current_iteration_mut() {
+                                                for _ in 0..3 {
+                                                    buffer.scroll_up();
+                                                }
+                                            }
+                                        }
+                                        MouseEventKind::ScrollDown => {
+                                            let mut state = self.state.lock().unwrap();
+                                            if let Some(buffer) = state.current_iteration_mut() {
+                                                for _ in 0..3 {
+                                                    buffer.scroll_down(viewport_height);
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                                    // Dismiss help on any key when help is showing
+                                    {
+                                        let mut state = self.state.lock().unwrap();
+                                        if state.show_help {
+                                            state.show_help = false;
+                                            continue;
+                                        }
+                                    }
 
-                            let mut widget = self.terminal_widget.lock().unwrap();
-                            widget.clear();
-                            self.scroll_manager.reset();
+                                    // Map key to action and dispatch
+                                    let action = map_key(key);
+                                    let mut state = self.state.lock().unwrap();
+                                    if dispatch_action(action, &mut state, viewport_height) {
+                                        break;
+                                    }
+                                }
+                                // Ignore other events (FocusGained, FocusLost, Paste, Resize, key releases)
+                                _ => {}
+                            }
+                        }
+                        Some(Err(e)) => {
+                            // Log error but continue - transient errors shouldn't crash TUI
+                            tracing::warn!("Event stream error: {}", e);
+                        }
+                        None => {
+                            // Stream ended unexpectedly
+                            break;
                         }
                     }
+                }
 
-                    // Compute layout to get terminal area dimensions
+                // Priority 2: Render at throttled rate (~60fps)
+                _ = render_tick.tick() => {
                     let frame_size = terminal.size()?;
                     let frame_area = ratatui::layout::Rect::new(0, 0, frame_size.width, frame_size.height);
                     let chunks = Layout::default()
                         .direction(Direction::Vertical)
                         .constraints([
-                            Constraint::Length(3),
-                            Constraint::Min(0),
-                            Constraint::Length(3),
+                            Constraint::Length(2),  // Header: content + bottom border
+                            Constraint::Min(0),     // Content: flexible
+                            Constraint::Length(2),  // Footer: top border + content
                         ])
                         .split(frame_area);
 
-                    let terminal_area = chunks[1];
-                    let new_size = (terminal_area.height, terminal_area.width);
-
-                    // Resize terminal widget and notify PTY if size changed
-                    if last_terminal_size != Some(new_size) {
-                        last_terminal_size = Some(new_size);
-                        {
-                            let mut widget = self.terminal_widget.lock().unwrap();
-                            widget.resize(new_size.0, new_size.1);
-                        }
-                        // Notify PTY of resize (cols, rows order per ControlCommand::Resize)
-                        let _ = self.control_tx.send(ralph_adapters::pty_handle::ControlCommand::Resize(new_size.1, new_size.0));
-                    }
+                    let content_area = chunks[1];
+                    viewport_height = content_area.height as usize;
 
                     let state = self.state.lock().unwrap();
-                    let widget = self.terminal_widget.lock().unwrap();
                     terminal.draw(|f| {
-                        f.render_widget(header::render(&state), chunks[0]);
-                        f.render_widget(tui_term::widget::PseudoTerminal::new(widget.parser().screen()), chunks[1]);
-                        f.render_widget(footer::render(&state, &self.scroll_manager), chunks[2]);
+                        // Render header
+                        f.render_widget(header::render(&state, chunks[0].width), chunks[0]);
 
+                        // Render content using ContentPane
+                        if let Some(buffer) = state.current_iteration() {
+                            let mut content_widget = ContentPane::new(buffer);
+                            if let Some(query) = &state.search_state.query {
+                                content_widget = content_widget.with_search(query);
+                            }
+                            f.render_widget(content_widget, content_area);
+                        }
+
+                        // Render footer
+                        f.render_widget(footer::render(&state), chunks[2]);
+
+                        // Render help overlay if active
                         if state.show_help {
                             help::render(f, f.area());
                         }
                     })?;
-
-                    // Poll for input events (keyboard and mouse)
-                    if event::poll(Duration::from_millis(0))? {
-                        match event::read()? {
-                            Event::Mouse(mouse) => {
-                                // Handle mouse scroll - works in any mode for better UX
-                                match mouse.kind {
-                                    MouseEventKind::ScrollUp => {
-                                        // Enter scroll mode if not already
-                                        if !self.state.lock().unwrap().in_scroll_mode {
-                                            self.input_router.enter_scroll_mode();
-                                            self.state.lock().unwrap().in_scroll_mode = true;
-                                            let widget = self.terminal_widget.lock().unwrap();
-                                            let total_lines = widget.total_lines();
-                                            drop(widget);
-                                            self.scroll_manager.update_dimensions(
-                                                total_lines,
-                                                terminal.size()?.height as usize - 6,
-                                            );
-                                        }
-                                        self.scroll_manager.scroll_up(3);
-                                    }
-                                    MouseEventKind::ScrollDown => {
-                                        if self.state.lock().unwrap().in_scroll_mode {
-                                            self.scroll_manager.scroll_down(3);
-                                            // Exit scroll mode if we've scrolled to bottom
-                                            if self.scroll_manager.offset() == 0 {
-                                                self.input_router.exit_scroll_mode();
-                                                self.scroll_manager.reset();
-                                                self.state.lock().unwrap().in_scroll_mode = false;
-                                            }
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                                // Dismiss help on any key
-                                if self.state.lock().unwrap().show_help {
-                                    self.state.lock().unwrap().show_help = false;
-                                    continue;
-                                }
-
-                                match self.input_router.route_key(key) {
-                                    RouteResult::Forward(key) => {
-                                        // Only forward to PTY if not paused
-                                        let is_paused = self.state.lock().unwrap().loop_mode == crate::state::LoopMode::Paused;
-                                        if !is_paused {
-                                            // Convert key to bytes and send to PTY
-                                            if let Some(bytes) = key_event_to_bytes(key) {
-                                                let _ = self.input_tx.send(bytes);
-                                            }
-                                        }
-                                    }
-                                    RouteResult::Command(cmd) => {
-                                        match cmd {
-                                            Command::Quit => break,
-                                            Command::Help => {
-                                                self.state.lock().unwrap().show_help = true;
-                                            }
-                                            Command::Pause => {
-                                                let mut state = self.state.lock().unwrap();
-                                                state.loop_mode = match state.loop_mode {
-                                                    crate::state::LoopMode::Auto => crate::state::LoopMode::Paused,
-                                                    crate::state::LoopMode::Paused => crate::state::LoopMode::Auto,
-                                                };
-                                            }
-                                            Command::Skip => {
-                                                let _ = self.control_tx.send(ralph_adapters::pty_handle::ControlCommand::Skip);
-                                            }
-                                            Command::Abort => {
-                                                let _ = self.control_tx.send(ralph_adapters::pty_handle::ControlCommand::Abort);
-                                            }
-                                            Command::EnterScroll => {
-                                                self.input_router.enter_scroll_mode();
-                                                self.state.lock().unwrap().in_scroll_mode = true;
-                                                // Update scroll dimensions
-                                                let widget = self.terminal_widget.lock().unwrap();
-                                                let total_lines = widget.total_lines();
-                                                drop(widget);
-                                                self.scroll_manager.update_dimensions(total_lines, terminal.size()?.height as usize - 6);
-                                            }
-                                            Command::Unknown => {}
-                                        }
-                                    }
-                                    RouteResult::ScrollKey(key) => {
-                                        // Handle n/N for search navigation
-                                        match key.code {
-                                            KeyCode::Char('n') => self.scroll_manager.next_match(),
-                                            KeyCode::Char('N') => self.scroll_manager.prev_match(),
-                                            _ => self.scroll_manager.handle_key(key),
-                                        }
-                                    }
-                                    RouteResult::ExitScroll => {
-                                        self.scroll_manager.reset();
-                                        self.scroll_manager.clear_search();
-                                        self.state.lock().unwrap().in_scroll_mode = false;
-                                    }
-                                    RouteResult::EnterSearch { forward } => {
-                                        let mut state = self.state.lock().unwrap();
-                                        state.search_query.clear();
-                                        state.search_forward = forward;
-                                    }
-                                    RouteResult::SearchInput(key) => {
-                                        if let KeyCode::Char(c) = key.code {
-                                            self.state.lock().unwrap().search_query.push(c);
-                                        } else if matches!(key.code, KeyCode::Backspace) {
-                                            self.state.lock().unwrap().search_query.pop();
-                                        }
-                                    }
-                                    RouteResult::ExecuteSearch => {
-                                        let state = self.state.lock().unwrap();
-                                        let query = state.search_query.clone();
-                                        let direction = if state.search_forward {
-                                            crate::scroll::SearchDirection::Forward
-                                        } else {
-                                            crate::scroll::SearchDirection::Backward
-                                        };
-                                        drop(state);
-
-                                        // Get terminal contents
-                                        let widget = self.terminal_widget.lock().unwrap();
-                                        let screen = widget.parser().screen();
-                                        let (_rows, cols) = screen.size();
-                                        let lines: Vec<String> = screen.rows(0, cols).collect();
-                                        drop(widget);
-
-                                        self.scroll_manager.start_search(query, direction, &lines);
-                                    }
-                                    RouteResult::CancelSearch => {
-                                        self.state.lock().unwrap().search_query.clear();
-                                    }
-                                    RouteResult::Consumed => {
-                                        // Prefix consumed, wait for command
-                                    }
-                                }
-                            }
-                            // Ignore other events (FocusGained, FocusLost, Paste, Resize, key releases)
-                            _ => {}
-                        }
-                    }
                 }
-                _ = tokio::signal::ctrl_c() => {
-                    break;
-                }
+
+                // Priority 3: Handle termination signal
                 _ = self.terminated_rx.changed() => {
-                    // PTY process terminated (e.g., double Ctrl+C)
                     if *self.terminated_rx.borrow() {
                         break;
                     }
@@ -345,34 +265,264 @@ impl App {
     }
 }
 
-fn key_event_to_bytes(key: KeyEvent) -> Option<Vec<u8>> {
-    match key.code {
-        KeyCode::Char(c) => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                let upper = c.to_ascii_uppercase() as u8;
-                return Some(vec![upper & 0x1f]);
-            }
-            Some(vec![c as u8])
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::{Action, map_key};
+    use crate::state::TuiState;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::text::Line;
+
+    // =========================================================================
+    // AC1: Events Reach State — TuiStreamHandler → IterationBuffer
+    // =========================================================================
 
     #[test]
-    fn ctrl_c_maps_to_etx() {
-        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        let bytes = key_event_to_bytes(key).expect("bytes");
-        assert_eq!(bytes, vec![3]);
+    fn dispatch_action_scroll_down_calls_scroll_down_on_current_buffer() {
+        // Given TuiState with an iteration buffer containing content
+        let mut state = TuiState::new();
+        state.start_new_iteration();
+        let buffer = state.current_iteration_mut().unwrap();
+        for i in 0..20 {
+            buffer.append_line(Line::from(format!("line {}", i)));
+        }
+        let initial_offset = state.current_iteration().unwrap().scroll_offset;
+        assert_eq!(initial_offset, 0);
+
+        // When dispatch_action with ScrollDown and viewport_height 10
+        dispatch_action(Action::ScrollDown, &mut state, 10);
+
+        // Then scroll_offset is incremented
+        assert_eq!(
+            state.current_iteration().unwrap().scroll_offset,
+            1,
+            "scroll_down should increment scroll_offset"
+        );
+    }
+
+    // =========================================================================
+    // AC2: Keyboard Triggers Actions — 'j' → scroll_down()
+    // =========================================================================
+
+    #[test]
+    fn j_key_triggers_scroll_down_action() {
+        // Given key press 'j'
+        let key = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+
+        // When map_key is called
+        let action = map_key(key);
+
+        // Then Action::ScrollDown is returned
+        assert_eq!(action, Action::ScrollDown);
     }
 
     #[test]
-    fn plain_char_maps_to_byte() {
-        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
-        let bytes = key_event_to_bytes(key).expect("bytes");
-        assert_eq!(bytes, vec![b'x']);
+    fn dispatch_action_scroll_up_calls_scroll_up_on_current_buffer() {
+        let mut state = TuiState::new();
+        state.start_new_iteration();
+        let buffer = state.current_iteration_mut().unwrap();
+        for i in 0..20 {
+            buffer.append_line(Line::from(format!("line {}", i)));
+        }
+        // Set initial scroll offset to 5
+        state.current_iteration_mut().unwrap().scroll_offset = 5;
+
+        dispatch_action(Action::ScrollUp, &mut state, 10);
+
+        assert_eq!(
+            state.current_iteration().unwrap().scroll_offset,
+            4,
+            "scroll_up should decrement scroll_offset"
+        );
+    }
+
+    #[test]
+    fn dispatch_action_scroll_top_jumps_to_top() {
+        let mut state = TuiState::new();
+        state.start_new_iteration();
+        let buffer = state.current_iteration_mut().unwrap();
+        for _ in 0..20 {
+            buffer.append_line(Line::from("line"));
+        }
+        state.current_iteration_mut().unwrap().scroll_offset = 10;
+
+        dispatch_action(Action::ScrollTop, &mut state, 10);
+
+        assert_eq!(state.current_iteration().unwrap().scroll_offset, 0);
+    }
+
+    #[test]
+    fn dispatch_action_scroll_bottom_jumps_to_bottom() {
+        let mut state = TuiState::new();
+        state.start_new_iteration();
+        let buffer = state.current_iteration_mut().unwrap();
+        for _ in 0..20 {
+            buffer.append_line(Line::from("line"));
+        }
+
+        dispatch_action(Action::ScrollBottom, &mut state, 10);
+
+        // max_scroll = 20 - 10 = 10
+        assert_eq!(state.current_iteration().unwrap().scroll_offset, 10);
+    }
+
+    #[test]
+    fn dispatch_action_next_iteration_navigates_forward() {
+        let mut state = TuiState::new();
+        state.start_new_iteration();
+        state.start_new_iteration();
+        state.start_new_iteration();
+        state.current_view = 0;
+        state.following_latest = false;
+
+        dispatch_action(Action::NextIteration, &mut state, 10);
+
+        assert_eq!(state.current_view, 1);
+    }
+
+    #[test]
+    fn dispatch_action_prev_iteration_navigates_backward() {
+        let mut state = TuiState::new();
+        state.start_new_iteration();
+        state.start_new_iteration();
+        state.start_new_iteration();
+        state.current_view = 2;
+
+        dispatch_action(Action::PrevIteration, &mut state, 10);
+
+        assert_eq!(state.current_view, 1);
+    }
+
+    #[test]
+    fn dispatch_action_show_help_sets_show_help() {
+        let mut state = TuiState::new();
+        assert!(!state.show_help);
+
+        dispatch_action(Action::ShowHelp, &mut state, 10);
+
+        assert!(state.show_help);
+    }
+
+    #[test]
+    fn dispatch_action_dismiss_help_clears_show_help() {
+        let mut state = TuiState::new();
+        state.show_help = true;
+
+        dispatch_action(Action::DismissHelp, &mut state, 10);
+
+        assert!(!state.show_help);
+    }
+
+    #[test]
+    fn dispatch_action_search_next_calls_next_match() {
+        let mut state = TuiState::new();
+        state.start_new_iteration();
+        let buffer = state.current_iteration_mut().unwrap();
+        buffer.append_line(Line::from("find me"));
+        buffer.append_line(Line::from("find me again"));
+        state.search("find");
+        assert_eq!(state.search_state.current_match, 0);
+
+        dispatch_action(Action::SearchNext, &mut state, 10);
+
+        assert_eq!(state.search_state.current_match, 1);
+    }
+
+    #[test]
+    fn dispatch_action_search_prev_calls_prev_match() {
+        let mut state = TuiState::new();
+        state.start_new_iteration();
+        let buffer = state.current_iteration_mut().unwrap();
+        buffer.append_line(Line::from("find me"));
+        buffer.append_line(Line::from("find me again"));
+        state.search("find");
+        state.search_state.current_match = 1;
+
+        dispatch_action(Action::SearchPrev, &mut state, 10);
+
+        assert_eq!(state.search_state.current_match, 0);
+    }
+
+    // =========================================================================
+    // AC5: Quit Returns True to Exit Loop
+    // =========================================================================
+
+    #[test]
+    fn dispatch_action_quit_returns_true() {
+        let mut state = TuiState::new();
+        let should_quit = dispatch_action(Action::Quit, &mut state, 10);
+        assert!(should_quit, "Quit action should return true to signal exit");
+    }
+
+    #[test]
+    fn dispatch_action_non_quit_returns_false() {
+        let mut state = TuiState::new();
+        state.start_new_iteration();
+        let buffer = state.current_iteration_mut().unwrap();
+        buffer.append_line(Line::from("line"));
+
+        let should_quit = dispatch_action(Action::ScrollDown, &mut state, 10);
+        assert!(!should_quit, "Non-quit actions should return false");
+    }
+
+    // =========================================================================
+    // AC6: No PTY Code — Structural Test
+    // =========================================================================
+
+    #[test]
+    fn no_pty_handle_in_app() {
+        let source = include_str!("app.rs");
+        let test_module_start = source.find("#[cfg(test)]").unwrap_or(source.len());
+        let production_code = &source[..test_module_start];
+
+        // Check for PTY-related imports/code
+        assert!(
+            !production_code.contains("PtyHandle"),
+            "app.rs should not contain PtyHandle after refactor"
+        );
+        assert!(
+            !production_code.contains("tui_term"),
+            "app.rs should not contain tui_term references after refactor"
+        );
+        assert!(
+            !production_code.contains("TerminalWidget"),
+            "app.rs should not contain TerminalWidget after refactor"
+        );
+    }
+
+    /// Regression test: TUI must NOT have tokio::signal::ctrl_c() handler.
+    ///
+    /// Raw mode prevents SIGINT, so tokio's signal handler never fires.
+    /// TUI must detect Ctrl+C directly via crossterm events.
+    #[test]
+    fn no_tokio_signal_handler_in_app() {
+        let source = include_str!("app.rs");
+        let pattern = ["tokio", "::", "signal", "::", "ctrl_c", "()"].concat();
+        let test_module_start = source.find("#[cfg(test)]").unwrap_or(source.len());
+        let production_code = &source[..test_module_start];
+        let occurrences: Vec<_> = production_code.match_indices(&pattern).collect();
+        assert!(
+            occurrences.is_empty(),
+            "Found {} occurrence(s) of tokio::signal::ctrl_c() in production code. \
+             This doesn't work in raw mode - use crossterm events instead.",
+            occurrences.len()
+        );
+    }
+
+    /// Verify Ctrl+C handling exists in production code.
+    ///
+    /// Since raw mode prevents SIGINT, we must handle Ctrl+C via crossterm events.
+    /// TUI is observation-only, so Ctrl+C breaks out of the event loop.
+    #[test]
+    fn ctrl_c_handling_exists_in_app() {
+        let source = include_str!("app.rs");
+        let test_module_start = source.find("#[cfg(test)]").unwrap_or(source.len());
+        let production_code = &source[..test_module_start];
+
+        assert!(
+            production_code.contains("KeyCode::Char('c')")
+                && production_code.contains("KeyModifiers::CONTROL"),
+            "Production code must detect Ctrl+C via crossterm events"
+        );
     }
 }

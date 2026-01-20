@@ -96,23 +96,20 @@ impl CliBackend {
         }
     }
 
-    /// Creates the Claude TUI backend for interactive mode.
+    /// Creates the Claude backend for interactive prompt injection.
     ///
-    /// Runs Claude in full interactive mode (no -p flag), allowing
-    /// Claude's native TUI to render. The prompt is passed as a
-    /// positional argument.
+    /// Runs Claude without `-p` flag, passing prompt as a positional argument.
+    /// Used by SOP runner for interactive command injection.
     ///
-    /// Unlike the standard `claude()` backend:
-    /// - No `-p` flag (enters interactive TUI mode)
-    /// - No `--output-format stream-json` (raw terminal output)
-    /// - Prompt is a positional argument, not a flag value
-    pub fn claude_tui() -> Self {
+    /// Note: This is NOT for TUI mode - Ralph's TUI uses the standard `claude()`
+    /// backend. This is for cases where Claude's interactive mode is needed.
+    pub fn claude_interactive() -> Self {
         Self {
             command: "claude".to_string(),
             args: vec!["--dangerously-skip-permissions".to_string()],
             prompt_mode: PromptMode::Arg,
-            prompt_flag: None,                 // No -p flag - prompt is positional
-            output_format: OutputFormat::Text, // Not stream-json
+            prompt_flag: None,
+            output_format: OutputFormat::Text,
         }
     }
 
@@ -269,7 +266,7 @@ impl CliBackend {
     /// Returns `CustomBackendError` if the backend name is not recognized.
     pub fn for_interactive_prompt(backend_name: &str) -> Result<Self, CustomBackendError> {
         match backend_name {
-            "claude" => Ok(Self::claude_tui()),
+            "claude" => Ok(Self::claude_interactive()),
             "kiro" => Ok(Self::kiro_interactive()),
             "gemini" => Ok(Self::gemini_interactive()),
             "codex" => Ok(Self::codex_interactive()),
@@ -540,8 +537,8 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_tui_backend() {
-        let backend = CliBackend::claude_tui();
+    fn test_claude_interactive_backend() {
+        let backend = CliBackend::claude_interactive();
         let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
 
         assert_eq!(cmd, "claude");

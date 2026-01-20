@@ -61,7 +61,12 @@ class TmuxSession:
         await proc.communicate()
 
     async def capture_pane(self, preserve_ansi: bool = True) -> str:
-        """Capture the current pane content.
+        """Capture the current visible pane content.
+
+        Note on alternate screen: TUI apps using EnterAlternateScreen (like ratatui)
+        render to what tmux considers the "current" visible screen. The -a flag
+        captures the alternate buffer (what was shown BEFORE entering alternate screen).
+        So for TUI apps, we capture WITHOUT -a to get the actual TUI content.
 
         Args:
             preserve_ansi: Whether to preserve ANSI escape sequences
@@ -72,9 +77,16 @@ class TmuxSession:
         if not self._created:
             raise RuntimeError("Session not created. Call create() first.")
 
+        # Capture the current visible content (works for both normal and alternate screen TUIs)
+        return await self._capture_with_flags(preserve_ansi, use_alternate=False)
+
+    async def _capture_with_flags(self, preserve_ansi: bool, use_alternate: bool) -> str:
+        """Internal helper to capture pane with specific flags."""
         cmd = ["tmux", "capture-pane", "-p", "-t", self.name]
         if preserve_ansi:
             cmd.insert(2, "-e")  # -e preserves escape sequences
+        if use_alternate:
+            cmd.insert(2, "-a")  # -a captures alternate screen
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -83,6 +95,36 @@ class TmuxSession:
         )
         stdout, _ = await proc.communicate()
         return stdout.decode()
+
+    async def wait_for_alternate_screen(self, timeout: float = 30.0, poll_interval: float = 0.5) -> bool:
+        """Wait for a TUI app to start rendering content.
+
+        Detects TUI startup by looking for TUI patterns like [iter N/M] in the
+        visible pane content. This works because ratatui TUIs render to the
+        current visible screen (not the alternate buffer that -a captures).
+
+        Args:
+            timeout: Maximum time to wait in seconds
+            poll_interval: How often to check in seconds
+
+        Returns:
+            True if TUI content is detected, False if timeout
+        """
+        import time
+        import re
+        start = time.time()
+        while (time.time() - start) < timeout:
+            content = await self.capture_pane(preserve_ansi=False)
+            # Look for TUI patterns that indicate Ralph TUI is running
+            # - [iter N/M] - iteration counter in header
+            # - [LIVE] or [REVIEW] - mode indicator
+            # - Content that's clearly TUI output (not shell prompt)
+            if re.search(r'\[iter\s+\d+(?:/\d+)?\]', content):
+                return True
+            if re.search(r'\[(LIVE|REVIEW)\]', content):
+                return True
+            await asyncio.sleep(poll_interval)
+        return False
 
     async def kill(self) -> None:
         """Kill the tmux session."""

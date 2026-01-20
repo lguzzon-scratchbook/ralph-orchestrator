@@ -44,4 +44,7 @@ pub use pty_executor::{
     CtrlCAction, CtrlCState, PtyConfig, PtyExecutionResult, PtyExecutor, TerminationType,
 };
 pub use pty_handle::{ControlCommand, PtyHandle};
-pub use stream_handler::{ConsoleStreamHandler, QuietStreamHandler, SessionResult, StreamHandler};
+pub use stream_handler::{
+    ConsoleStreamHandler, PrettyStreamHandler, QuietStreamHandler, SessionResult, StreamHandler,
+    TuiStreamHandler,
+};

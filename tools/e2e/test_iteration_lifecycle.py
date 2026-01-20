@@ -55,11 +55,11 @@ async def test_iteration_counter_increments(
     iteration_config_factory: Callable,
     iteration_evidence_dir: Path,
 ):
-    """Validate TUI shows [iter 1], [iter 2], [iter 3] in sequence.
+    """Validate TUI shows [iter 1/N], [iter 2/N], [iter 3/N] in sequence.
 
     Given Ralph running a multi-iteration task
     When TUI is captured at iterations 1, 2, 3
-    Then each capture shows correct [iter N] in header
+    Then each capture shows correct [iter N/M] in header
     And LLM-judge validates counter increments by exactly 1
     """
     # Create config that allows multiple iterations
@@ -71,8 +71,9 @@ async def test_iteration_counter_increments(
 
     # Build command that requires multiple iterations
     # Use a prompt that won't complete immediately
+    # Note: --tui is required for TUI output format [iter N/M]
     cmd = (
-        f"{ralph_binary} run "
+        f"{ralph_binary} run --tui "
         f"-c {config_path} "
         f'-p "Create a file called test.txt, write hello to it, then read it back. '
         f'Do this in separate steps to demonstrate iteration."'
@@ -81,11 +82,15 @@ async def test_iteration_counter_increments(
     # Start Ralph in tmux session
     await tmux_session.send_keys(cmd)
 
-    # Wait a moment for TUI to initialize
-    await asyncio.sleep(2)
+    # Wait for TUI to enter alternate screen mode (ratatui uses this)
+    # This ensures we capture the actual TUI, not the shell prompt
+    alt_screen_ready = await tmux_session.wait_for_alternate_screen(timeout=30.0)
+    if not alt_screen_ready:
+        # Fall back to waiting a bit longer if alternate screen detection fails
+        await asyncio.sleep(5)
 
     # Capture iterations 1, 2, 3
-    captures: list[IterationCaptureResult] = []
+    captures: list[IterationState] = []
     judge_results: list[JudgeResult] = []
 
     for target_iter in [1, 2, 3]:
@@ -93,6 +98,7 @@ async def test_iteration_counter_increments(
             capture = await iteration_capture.wait_for_iteration(
                 target_iter,
                 timeout=45.0,
+                debug=True,  # Enable debug output
             )
             
             if capture is None:
@@ -184,8 +190,9 @@ async def test_max_iterations_exit_code(
     )
 
     # Use a task that will never complete quickly
+    # Note: --tui is required for TUI output format [iter N/M]
     cmd = (
-        f"{ralph_binary} run "
+        f"{ralph_binary} run --tui "
         f"-c {config_path} "
         f'-p "Implement a full REST API with CRUD operations for users, posts, '
         f'and comments. Include authentication, validation, and error handling."'
@@ -193,6 +200,11 @@ async def test_max_iterations_exit_code(
 
     # Start Ralph
     await tmux_session.send_keys(cmd)
+
+    # Wait for TUI to enter alternate screen mode
+    alt_screen_ready = await tmux_session.wait_for_alternate_screen(timeout=30.0)
+    if not alt_screen_ready:
+        await asyncio.sleep(5)
 
     # Wait for process to exit (should hit max iterations)
     exited, final_content = await iteration_capture.wait_for_process_exit(
@@ -276,14 +288,20 @@ async def test_completion_dual_confirmation(
     )
 
     # Simple task that should complete quickly
+    # Note: --tui is required for TUI output format [iter N/M]
     cmd = (
-        f"{ralph_binary} run "
+        f"{ralph_binary} run --tui "
         f"-c {config_path} "
         f'-p "Echo hello world. This is a simple test."'
     )
 
     # Start Ralph
     await tmux_session.send_keys(cmd)
+
+    # Wait for TUI to enter alternate screen mode
+    alt_screen_ready = await tmux_session.wait_for_alternate_screen(timeout=30.0)
+    if not alt_screen_ready:
+        await asyncio.sleep(5)
 
     # Wait for completion
     exited, final_content = await iteration_capture.wait_for_process_exit(
@@ -363,14 +381,20 @@ async def test_fresh_context_scratchpad_reread(
     scratchpad_path.write_text(f"# Scratchpad\n\nMarker: {initial_marker}\n")
 
     # Start Ralph with a task that reads the scratchpad
+    # Note: --tui is required for TUI output format [iter N/M]
     cmd = (
-        f"{ralph_binary} run "
+        f"{ralph_binary} run --tui "
         f"-c {config_path} "
         f'-p "Read the scratchpad and report the marker value. '
         f'Then create a simple test file."'
     )
 
     await tmux_session.send_keys(cmd)
+
+    # Wait for TUI to enter alternate screen mode
+    alt_screen_ready = await tmux_session.wait_for_alternate_screen(timeout=30.0)
+    if not alt_screen_ready:
+        await asyncio.sleep(5)
 
     # Wait for first iteration
     try:
@@ -471,13 +495,14 @@ async def test_iteration_capture_pattern_matching():
     import re
 
     # Test pattern matching via IterationState.from_content()
-    ITER_PATTERN = re.compile(r'\[iter\s+(\d+)\]')
+    # TUI header format is [iter N/M] where N is current and M is total
+    ITER_PATTERN = re.compile(r'\[iter\s+(\d+)(?:/\d+)?\]')
 
     content_samples = [
-        ("[iter 1] 00:05 | 🔨 Build | ▶ auto", 1, "00:05", "auto"),
-        ("[iter 2] 01:23 | 🔧 Test | ▶ auto", 2, "01:23", "auto"),
-        ("[iter 10] 05:00 | 📝 Plan | ▶ interactive", 10, "05:00", "interactive"),
-        ("[iter 99] 10:00 | 🎯 Deploy | ▶ auto", 99, "10:00", "auto"),
+        ("[iter 1/3] 00:05 | 🔨 Build | ▶ auto", 1, "00:05", "auto"),
+        ("[iter 2/5] 01:23 | 🔧 Test | ▶ auto", 2, "01:23", "auto"),
+        ("[iter 10/20] 05:00 | 📝 Plan | ▶ interactive", 10, "05:00", "interactive"),
+        ("[iter 99/100] 10:00 | 🎯 Deploy | ▶ auto", 99, "10:00", "auto"),
     ]
 
     for content, expected_iter, expected_time, expected_mode in content_samples:

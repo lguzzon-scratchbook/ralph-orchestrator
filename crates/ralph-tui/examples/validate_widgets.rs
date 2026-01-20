@@ -41,16 +41,15 @@ fn main() {
             .unwrap(),
     );
     state.pending_hat = Some((HatId::new("builder"), "🔨Builder".to_string()));
-    state.loop_mode = ralph_tui::LoopMode::Auto;
     state.last_event = Some("build.task".to_string());
     state.last_event_at = Some(std::time::Instant::now()); // Active
 
-    // Render header
-    let backend = TestBackend::new(80, 3);
+    // Render header (1-line borderless design)
+    let backend = TestBackend::new(80, 1);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| {
-            let widget = ralph_tui::header::render(&state);
+            let widget = ralph_tui::header::render(&state, 80);
             f.render_widget(widget, f.area());
         })
         .unwrap();
@@ -60,13 +59,13 @@ fn main() {
     println!("{}", header_output);
     println!();
 
-    // Render header with scroll mode
+    // Render header with scroll mode (1-line borderless design)
     state.in_scroll_mode = true;
-    let backend = TestBackend::new(80, 3);
+    let backend = TestBackend::new(80, 1);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| {
-            let widget = ralph_tui::header::render(&state);
+            let widget = ralph_tui::header::render(&state, 80);
             f.render_widget(widget, f.area());
         })
         .unwrap();
@@ -77,30 +76,13 @@ fn main() {
     println!();
     state.in_scroll_mode = false;
 
-    // Render header with paused mode
-    state.loop_mode = ralph_tui::LoopMode::Paused;
-    let backend = TestBackend::new(80, 3);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|f| {
-            let widget = ralph_tui::header::render(&state);
-            f.render_widget(widget, f.area());
-        })
-        .unwrap();
-    let header_paused_output = render_to_string(&terminal);
-    fs::write(output_dir.join("header_paused.txt"), &header_paused_output).unwrap();
-    println!("Header (paused mode) output written to tui-validation/header_paused.txt");
-    println!("{}", header_paused_output);
-    println!();
-    state.loop_mode = ralph_tui::LoopMode::Auto;
-
-    // Render header with idle countdown
+    // Render header with idle countdown (1-line borderless design)
     state.idle_timeout_remaining = Some(Duration::from_secs(25));
-    let backend = TestBackend::new(80, 3);
+    let backend = TestBackend::new(80, 1);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| {
-            let widget = ralph_tui::header::render(&state);
+            let widget = ralph_tui::header::render(&state, 80);
             f.render_widget(widget, f.area());
         })
         .unwrap();
@@ -111,13 +93,12 @@ fn main() {
     println!();
     state.idle_timeout_remaining = None;
 
-    // Render footer (default)
-    let scroll_manager = ralph_tui::scroll::ScrollManager::new();
-    let backend = TestBackend::new(80, 3);
+    // Render footer (default) - 1-line borderless design
+    let backend = TestBackend::new(80, 1);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| {
-            let widget = ralph_tui::footer::render(&state, &scroll_manager);
+            let widget = ralph_tui::footer::render(&state);
             f.render_widget(widget, f.area());
         })
         .unwrap();
@@ -127,17 +108,17 @@ fn main() {
     println!("{}", footer_output);
     println!();
 
-    // Render footer (idle state)
+    // Render footer (idle state) - 1-line borderless design
     state.last_event_at = Some(
         std::time::Instant::now()
             .checked_sub(Duration::from_secs(10))
             .unwrap(),
     );
-    let backend = TestBackend::new(80, 3);
+    let backend = TestBackend::new(80, 1);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| {
-            let widget = ralph_tui::footer::render(&state, &scroll_manager);
+            let widget = ralph_tui::footer::render(&state);
             f.render_widget(widget, f.area());
         })
         .unwrap();
@@ -147,13 +128,13 @@ fn main() {
     println!("{}", footer_idle_output);
     println!();
 
-    // Render footer (done state)
+    // Render footer (done state) - 1-line borderless design
     state.pending_hat = None;
-    let backend = TestBackend::new(80, 3);
+    let backend = TestBackend::new(80, 1);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|f| {
-            let widget = ralph_tui::footer::render(&state, &scroll_manager);
+            let widget = ralph_tui::footer::render(&state);
             f.render_widget(widget, f.area());
         })
         .unwrap();
@@ -163,7 +144,7 @@ fn main() {
     println!("{}", footer_done_output);
     println!();
 
-    // Render full layout simulation
+    // Render full layout simulation (1-line header/footer, maximizes terminal pane)
     state.pending_hat = Some((HatId::new("builder"), "🔨Builder".to_string()));
     state.last_event_at = Some(std::time::Instant::now());
     let backend = TestBackend::new(100, 24);
@@ -173,13 +154,16 @@ fn main() {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),
-                    Constraint::Min(0),
-                    Constraint::Length(3),
+                    Constraint::Length(1), // Header (1 line, borderless)
+                    Constraint::Min(0),    // Terminal pane (flex)
+                    Constraint::Length(1), // Footer (1 line, borderless)
                 ])
                 .split(f.area());
 
-            f.render_widget(ralph_tui::header::render(&state), chunks[0]);
+            f.render_widget(
+                ralph_tui::header::render(&state, chunks[0].width),
+                chunks[0],
+            );
             // Middle content area (just empty for this test)
             f.render_widget(
                 ratatui::widgets::Block::default()
@@ -187,10 +171,7 @@ fn main() {
                     .title(" Terminal Output "),
                 chunks[1],
             );
-            f.render_widget(
-                ralph_tui::footer::render(&state, &scroll_manager),
-                chunks[2],
-            );
+            f.render_widget(ralph_tui::footer::render(&state), chunks[2]);
         })
         .unwrap();
     let full_output = render_to_string(&terminal);

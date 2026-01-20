@@ -181,7 +181,7 @@ if event::poll(Duration::from_millis(10))? {
 1. **Manual double Ctrl+C test:**
    ```bash
    cargo build --release
-   ./target/release/ralph run -i -c ralph.claude.yml -p "Long running task"
+   ./target/release/ralph run --tui -c ralph.claude.yml -p "Long running task"
    # Press Ctrl+C twice quickly
    ```
    - TUI should exit cleanly

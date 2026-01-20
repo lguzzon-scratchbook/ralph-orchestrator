@@ -129,7 +129,7 @@ if state.iteration_changed() {
 1. **Manual test with multiple iterations:**
    ```bash
    cargo build --release
-   ./target/release/ralph run -i -c ralph.claude.yml -p "Do task 1, then task 2"
+   ./target/release/ralph run --tui -c ralph.claude.yml -p "Do task 1, then task 2"
    ```
    - Watch for clean transitions between iterations
    - No garbled text should appear

@@ -16,6 +16,8 @@ event_loop:
 cli:
   backend: "opencode"
   prompt_mode: "arg"                   # Positional argument after `run` subcommand
+  prompt_args: 
+    - "--model"
 
 # Core behaviors (always injected into prompts)
 core:

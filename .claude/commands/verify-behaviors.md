@@ -39,8 +39,8 @@ Run all behavioral verifications from `specs/behaviors.yaml` and report status.
 
 ## Results by Spec
 
-### interactive-mode.spec.md
-- ✅ -i/--interactive flag exists
+### tui-mode.spec.md
+- ✅ --tui flag exists
 - ✅ -a/--autonomous flag exists
 - ✅ --idle-timeout flag exists
 - ❌ Double Ctrl+C handling (cannot verify in non-interactive)

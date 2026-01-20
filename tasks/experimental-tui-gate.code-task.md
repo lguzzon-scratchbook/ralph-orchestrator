@@ -1,16 +1,20 @@
 ---
-status: completed
+status: obsolete
 created: 2026-01-15
 started: 2026-01-15
 completed: 2026-01-15
+obsoleted: 2026-01-19
 ---
 # Task: Gate Interactive Mode Behind Experimental Flag
 
+> **OBSOLETE**: This experimental gate was removed on 2026-01-19 after the TUI stabilized.
+> The `--tui` flag now works without requiring any config changes.
+
 ## Description
-Add an `experimental_tui` configuration flag to gate the `-i`/`--interactive` mode behind an explicit opt-in. When users attempt to use interactive mode without enabling this flag, emit a helpful warning and fall back to autonomous mode.
+Add an `experimental_tui` configuration flag to gate the `--tui` mode behind an explicit opt-in. When users attempt to use TUI mode without enabling this flag, emit a helpful warning and fall back to autonomous mode.
 
 ## Background
-The interactive TUI mode (`-i` flag) is currently buggy and not ready for general use. Rather than removing the feature entirely, we want to gate it behind an experimental flag so that:
+The TUI mode (`--tui` flag) is currently buggy and not ready for general use. Rather than removing the feature entirely, we want to gate it behind an experimental flag so that:
 1. Users don't accidentally encounter bugs
 2. Developers and testers can still access the feature for development
 3. The feature remains in the codebase for continued iteration
@@ -19,11 +23,11 @@ The codebase already has a "deferred feature" pattern used for `archive_prompts`
 
 ## Technical Requirements
 1. Add `experimental_tui: bool` field to `CliConfig` struct with `#[serde(default)]` (defaults to false)
-2. In `run_loop_impl`, check `experimental_tui` before enabling interactive mode
-3. If interactive is requested but `experimental_tui` is false:
+2. In `run_loop_impl`, check `experimental_tui` before enabling TUI mode
+3. If TUI mode is requested but `experimental_tui` is false:
    - Emit a warning explaining how to enable the feature
    - Fall back to autonomous mode (do not error out)
-4. If `experimental_tui` is true, allow interactive mode to proceed normally
+4. If `experimental_tui` is true, allow TUI mode to proceed normally
 5. Update any relevant documentation or config examples
 
 ## Dependencies
@@ -47,12 +51,12 @@ The codebase already has a "deferred feature" pattern used for `archive_prompts`
 
 2. **Interactive Blocked Without Flag**
    - Given `experimental_tui` is false or unset in config
-   - When user runs `ralph run -i -c config.yml -p "test"`
+   - When user runs `ralph run --tui -c config.yml -p "test"`
    - Then a warning is emitted explaining the experimental flag and execution continues in autonomous mode
 
 3. **Interactive Allowed With Flag**
    - Given `experimental_tui: true` in the config file
-   - When user runs `ralph run -i -c config.yml -p "test"`
+   - When user runs `ralph run --tui -c config.yml -p "test"`
    - Then interactive mode proceeds normally (assuming TTY is available)
 
 4. **Warning Message Is Helpful**

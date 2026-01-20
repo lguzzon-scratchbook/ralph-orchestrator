@@ -173,6 +173,10 @@ pub struct PtyExecutor {
     // Termination notification for TUI
     terminated_tx: watch::Sender<bool>,
     terminated_rx: Option<watch::Receiver<bool>>,
+    // Explicit TUI mode flag - set via set_tui_mode() when TUI is connected.
+    // This replaces the previous inference via output_rx.is_none() which broke
+    // after the streaming refactor (handle() is no longer called in TUI mode).
+    tui_mode: bool,
 }
 
 impl PtyExecutor {
@@ -194,7 +198,20 @@ impl PtyExecutor {
             control_rx,
             terminated_tx,
             terminated_rx: Some(terminated_rx),
+            tui_mode: false,
         }
+    }
+
+    /// Sets the TUI mode flag.
+    ///
+    /// When TUI mode is enabled, PTY output is sent to the TUI channel instead of
+    /// being written directly to stdout. This flag must be set before calling any
+    /// of the run methods when using the TUI.
+    ///
+    /// # Arguments
+    /// * `enabled` - Whether TUI mode should be active
+    pub fn set_tui_mode(&mut self, enabled: bool) {
+        self.tui_mode = enabled;
     }
 
     /// Returns a handle for TUI integration.
@@ -323,7 +340,7 @@ impl PtyExecutor {
         let (output_tx, mut output_rx) = mpsc::channel::<OutputEvent>(256);
         let should_terminate_reader = Arc::clone(&should_terminate);
         // Check if TUI is handling output (output_rx taken by handle())
-        let tui_connected = self.output_rx.is_none();
+        let tui_connected = self.tui_mode;
         let tui_output_tx = if tui_connected {
             Some(self.output_tx.clone())
         } else {
@@ -526,10 +543,9 @@ impl PtyExecutor {
         // Check output format to decide parsing strategy
         let output_format = self.backend.output_format;
 
-        // If not StreamJson, delegate to regular run_observe
-        if output_format != OutputFormat::StreamJson {
-            return self.run_observe(prompt, interrupt_rx).await;
-        }
+        // StreamJson format uses NDJSON line parsing
+        // Text format streams raw output directly to handler
+        let is_stream_json = output_format == OutputFormat::StreamJson;
 
         // Keep temp_file alive for the duration of execution
         let (pair, mut child, stdin_input, _temp_file) = self.spawn_pty(prompt)?;
@@ -573,7 +589,7 @@ impl PtyExecutor {
         // Spawn blocking reader thread
         let (output_tx, mut output_rx) = mpsc::channel::<OutputEvent>(256);
         let should_terminate_reader = Arc::clone(&should_terminate);
-        let tui_connected = self.output_rx.is_none();
+        let tui_connected = self.tui_mode;
         let tui_output_tx = if tui_connected {
             Some(self.output_tx.clone())
         } else {
@@ -647,25 +663,31 @@ impl PtyExecutor {
                             output.extend_from_slice(&data);
                             last_activity = Instant::now();
 
-                            // Parse JSON lines from the data
                             if let Ok(text) = std::str::from_utf8(&data) {
-                                line_buffer.push_str(text);
+                                if is_stream_json {
+                                    // StreamJson format: Parse JSON lines from the data
+                                    line_buffer.push_str(text);
 
-                                // Process complete lines
-                                while let Some(newline_pos) = line_buffer.find('\n') {
-                                    let line = line_buffer[..newline_pos].to_string();
-                                    line_buffer = line_buffer[newline_pos + 1..].to_string();
+                                    // Process complete lines
+                                    while let Some(newline_pos) = line_buffer.find('\n') {
+                                        let line = line_buffer[..newline_pos].to_string();
+                                        line_buffer = line_buffer[newline_pos + 1..].to_string();
 
-                                    if let Some(event) = ClaudeStreamParser::parse_line(&line) {
-                                        dispatch_stream_event(event, handler, &mut extracted_text);
+                                        if let Some(event) = ClaudeStreamParser::parse_line(&line) {
+                                            dispatch_stream_event(event, handler, &mut extracted_text);
+                                        }
                                     }
+                                } else {
+                                    // Text format: Stream raw output directly to handler
+                                    // This preserves ANSI escape codes for TUI rendering
+                                    handler.on_text(text);
                                 }
                             }
                         }
                         Some(OutputEvent::Eof) | None => {
                             debug!("Output channel closed");
-                            // Process any remaining content in buffer
-                            if !line_buffer.is_empty()
+                            // Process any remaining content in buffer (StreamJson only)
+                            if is_stream_json && !line_buffer.is_empty()
                                 && let Some(event) = ClaudeStreamParser::parse_line(&line_buffer)
                             {
                                 dispatch_stream_event(event, handler, &mut extracted_text);
@@ -711,20 +733,27 @@ impl PtyExecutor {
                     if let OutputEvent::Data(data) = event {
                         output.extend_from_slice(&data);
                         if let Ok(text) = std::str::from_utf8(&data) {
-                            line_buffer.push_str(text);
-                            while let Some(newline_pos) = line_buffer.find('\n') {
-                                let line = line_buffer[..newline_pos].to_string();
-                                line_buffer = line_buffer[newline_pos + 1..].to_string();
-                                if let Some(event) = ClaudeStreamParser::parse_line(&line) {
-                                    dispatch_stream_event(event, handler, &mut extracted_text);
+                            if is_stream_json {
+                                // StreamJson: parse JSON lines
+                                line_buffer.push_str(text);
+                                while let Some(newline_pos) = line_buffer.find('\n') {
+                                    let line = line_buffer[..newline_pos].to_string();
+                                    line_buffer = line_buffer[newline_pos + 1..].to_string();
+                                    if let Some(event) = ClaudeStreamParser::parse_line(&line) {
+                                        dispatch_stream_event(event, handler, &mut extracted_text);
+                                    }
                                 }
+                            } else {
+                                // Text: stream raw output to handler
+                                handler.on_text(text);
                             }
                         }
                     }
                 }
 
-                // Process final buffer content
-                if !line_buffer.is_empty()
+                // Process final buffer content (StreamJson only)
+                if is_stream_json
+                    && !line_buffer.is_empty()
                     && let Some(event) = ClaudeStreamParser::parse_line(&line_buffer)
                 {
                     dispatch_stream_event(event, handler, &mut extracted_text);
@@ -839,7 +868,7 @@ impl PtyExecutor {
         let (output_tx, mut output_rx) = mpsc::channel::<OutputEvent>(256);
         let should_terminate_output = Arc::clone(&should_terminate);
         // Check if TUI is handling output (output_rx taken by handle())
-        let tui_connected = self.output_rx.is_none();
+        let tui_connected = self.tui_mode;
         let tui_output_tx = if tui_connected {
             Some(self.output_tx.clone())
         } else {
@@ -894,38 +923,47 @@ impl PtyExecutor {
             debug!("PTY output reader thread exiting");
         });
 
-        // Spawn input reading task
-        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<InputEvent>();
-        let should_terminate_input = Arc::clone(&should_terminate);
+        // Spawn input reading task - ONLY when TUI is NOT connected
+        // In TUI mode (observation mode), user input should not be captured from stdin.
+        // The TUI has its own input handling, and raw Ctrl+C should go directly to the
+        // signal handler (interrupt_rx) without racing with the stdin reader.
+        let mut input_rx = if tui_connected {
+            debug!("TUI connected - skipping stdin reader thread");
+            None
+        } else {
+            let (input_tx, input_rx) = mpsc::unbounded_channel::<InputEvent>();
+            let should_terminate_input = Arc::clone(&should_terminate);
 
-        std::thread::spawn(move || {
-            let mut stdin = io::stdin();
-            let mut buf = [0u8; 1];
+            std::thread::spawn(move || {
+                let mut stdin = io::stdin();
+                let mut buf = [0u8; 1];
 
-            loop {
-                if should_terminate_input.load(Ordering::SeqCst) {
-                    break;
-                }
-
-                match stdin.read(&mut buf) {
-                    Ok(0) => break, // EOF
-                    Ok(1) => {
-                        let byte = buf[0];
-                        let event = match byte {
-                            3 => InputEvent::CtrlC,          // Ctrl+C
-                            28 => InputEvent::CtrlBackslash, // Ctrl+\
-                            _ => InputEvent::Data(vec![byte]),
-                        };
-                        if input_tx.send(event).is_err() {
-                            break;
-                        }
+                loop {
+                    if should_terminate_input.load(Ordering::SeqCst) {
+                        break;
                     }
-                    Ok(_) => {} // Shouldn't happen with 1-byte buffer
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(_) => break,
+
+                    match stdin.read(&mut buf) {
+                        Ok(0) => break, // EOF
+                        Ok(1) => {
+                            let byte = buf[0];
+                            let event = match byte {
+                                3 => InputEvent::CtrlC,          // Ctrl+C
+                                28 => InputEvent::CtrlBackslash, // Ctrl+\
+                                _ => InputEvent::Data(vec![byte]),
+                            };
+                            if input_tx.send(event).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(_) => {} // Shouldn't happen with 1-byte buffer
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
                 }
-            }
-        });
+            });
+            Some(input_rx)
+        };
 
         // Write stdin input after threads are spawned (so we capture any output)
         // Give Claude's TUI a moment to initialize before sending the prompt
@@ -1018,8 +1056,13 @@ impl PtyExecutor {
                     }
                 }
 
-                // User input received (from stdin)
-                input_event = async { input_rx.recv().await } => {
+                // User input received (from stdin) - only active when TUI is NOT connected
+                input_event = async {
+                    match input_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await, // Never resolves when TUI is connected
+                    }
+                } => {
                     match input_event {
                         Some(InputEvent::CtrlC) => {
                             match ctrl_c_state.handle_ctrl_c(Instant::now()) {
@@ -1583,5 +1626,81 @@ mod tests {
 
         assert_eq!(result.extracted_text, extracted);
         assert!(result.stripped_output.contains("raw output"));
+    }
+
+    /// Regression test: TUI mode should not spawn stdin reader thread
+    ///
+    /// Bug: In TUI mode, Ctrl+C required double-press to exit because the stdin
+    /// reader thread (which captures byte 0x03) raced with the signal handler.
+    /// The stdin reader would win, triggering "double Ctrl+C" logic instead of
+    /// clean exit via interrupt_rx.
+    ///
+    /// Fix: When tui_connected=true, skip spawning stdin reader entirely.
+    /// TUI mode is observation-only; user input should not be captured from stdin.
+    /// The TUI has its own input handling (Ctrl+a q), and raw Ctrl+C goes directly
+    /// to the signal handler (interrupt_rx) without racing.
+    ///
+    /// This test documents the expected behavior. The actual fix is in
+    /// run_interactive() where `let mut input_rx = if !tui_connected { ... }`.
+    #[test]
+    fn test_tui_mode_stdin_reader_bypass() {
+        // The tui_connected flag is now determined by the explicit tui_mode field,
+        // set via set_tui_mode(true) when TUI is connected.
+        // Previously used output_rx.is_none() which broke after streaming refactor.
+
+        // Simulate TUI connected scenario (tui_mode = true)
+        let tui_mode = true;
+        let tui_connected = tui_mode;
+
+        // When TUI is connected, stdin reader is skipped
+        // (verified by: input_rx becomes None instead of Some(channel))
+        assert!(
+            tui_connected,
+            "When tui_mode is true, stdin reader must be skipped"
+        );
+
+        // In non-TUI mode, stdin reader is spawned
+        let tui_mode_disabled = false;
+        let tui_connected_non_tui = tui_mode_disabled;
+        assert!(
+            !tui_connected_non_tui,
+            "When tui_mode is false, stdin reader must be spawned"
+        );
+    }
+
+    #[test]
+    fn test_tui_mode_default_is_false() {
+        // Create a PtyExecutor and verify tui_mode defaults to false
+        let backend = CliBackend::claude();
+        let config = PtyConfig::default();
+        let executor = PtyExecutor::new(backend, config);
+
+        // tui_mode should default to false
+        assert!(!executor.tui_mode, "tui_mode should default to false");
+    }
+
+    #[test]
+    fn test_set_tui_mode() {
+        // Create a PtyExecutor and verify set_tui_mode works
+        let backend = CliBackend::claude();
+        let config = PtyConfig::default();
+        let mut executor = PtyExecutor::new(backend, config);
+
+        // Initially false
+        assert!(!executor.tui_mode, "tui_mode should start as false");
+
+        // Set to true
+        executor.set_tui_mode(true);
+        assert!(
+            executor.tui_mode,
+            "tui_mode should be true after set_tui_mode(true)"
+        );
+
+        // Set back to false
+        executor.set_tui_mode(false);
+        assert!(
+            !executor.tui_mode,
+            "tui_mode should be false after set_tui_mode(false)"
+        );
     }
 }

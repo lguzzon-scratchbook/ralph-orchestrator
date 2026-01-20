@@ -3,7 +3,7 @@ status: review
 gap_analysis: 2026-01-14
 last_updated: 2026-01-14
 related:
-  - interactive-mode.spec.md
+  - tui-mode.spec.md
   - event-loop.spec.md
   - adapters/claude.spec.md
   - adapters/gemini.spec.md
@@ -106,7 +106,7 @@ cli:
 1. Test the command manually first: `echo "hello" | your-tool` or `your-tool --prompt "hello"`
 2. Ensure the tool exits cleanly after producing output (no interactive prompts)
 3. If the tool has approval prompts, find the flag to disable them
-4. For tools that require TTY, use interactive mode (`ralph run -i`)
+4. For tools that require TTY, use TUI mode (`ralph run --tui`)
 
 ## Configuration
 
@@ -139,7 +139,7 @@ cli:
 
   # Execution mode (see interactive-mode.spec.md)
   default_mode: "autonomous"     # "autonomous" or "interactive"
-  idle_timeout_secs: 30          # Kill after N seconds idle (interactive mode only)
+  idle_timeout_secs: 30          # Kill after N seconds idle (TUI mode only)
 
 # Per-adapter settings
 adapters:
@@ -283,7 +283,7 @@ Agents execute in a specific working directory, which determines where file oper
 
 **Why not the project root?** Some agents (like Claude) use their working directory to determine project scope. Running from a subdirectory is intentional—it lets users scope the agent to a specific area of the codebase.
 
-**PTY considerations**: When spawning agents in a PTY (interactive mode), the working directory must be set explicitly on the `CommandBuilder`. The PTY does not automatically inherit the parent process's cwd in all cases. See [interactive-mode.spec.md](interactive-mode.spec.md) for details.
+**PTY considerations**: When spawning agents in a PTY (TUI mode), the working directory must be set explicitly on the `CommandBuilder`. The PTY does not automatically inherit the parent process's cwd in all cases. See [tui-mode.spec.md](tui-mode.spec.md) for details.
 
 ### Output Processing
 
@@ -374,21 +374,21 @@ Some backends support structured JSON output (see Structured Output column in Qu
 **When** Ralph attempts to spawn the agent
 **Then** an error is returned indicating the working directory is inaccessible
 
-**Given** interactive mode with PTY spawning
+**Given** TUI mode with PTY spawning
 **When** Ralph builds the command
 **Then** the working directory is explicitly set on the PTY `CommandBuilder` (not relying on inheritance)
 
-### Interactive Mode Compatibility
+### TUI Mode Compatibility
 
 **Given** `backend: "claude"` in autonomous mode
 **When** Ralph executes an iteration
 **Then** Ralph spawns Claude in a PTY (required due to Claude's TTY dependency)
 
-**Given** interactive mode (`-i`) and `backend: "custom"`
+**Given** TUI mode (`--tui`) and `backend: "custom"`
 **When** the custom backend doesn't render TUI output
 **Then** execution still works (PTY is transparent to simple CLI tools)
 
-See [interactive-mode.spec.md](interactive-mode.spec.md) for details on execution modes.
+See [tui-mode.spec.md](tui-mode.spec.md) for details on execution modes.
 
 ## Non-Goals
 

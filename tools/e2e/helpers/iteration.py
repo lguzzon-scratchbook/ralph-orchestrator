@@ -27,8 +27,9 @@ class IterationCapture:
     the TUI state when specific iterations are reached.
     """
 
-    # Pattern to match iteration display: [iter N] or [iter N] with optional whitespace
-    ITER_PATTERN = re.compile(r"\[iter\s+(\d+)\]")
+    # Pattern to match iteration display: [iter N/M] (e.g., [iter 1/3])
+    # The (?:/\d+)? makes the /M part optional for backward compatibility
+    ITER_PATTERN = re.compile(r"\[iter\s+(\d+)(?:/\d+)?\]")
 
     def __init__(
         self,

@@ -1,7 +1,7 @@
 """Iteration state capture helper for E2E testing.
 
 Provides utilities to capture TUI state at iteration boundaries
-by polling for [iter N] pattern changes.
+by polling for [iter N/M] pattern changes.
 """
 
 import asyncio
@@ -35,8 +35,8 @@ class IterationState:
         Returns:
             IterationState with parsed fields
         """
-        # Extract iteration number from [iter N] pattern
-        iter_match = re.search(r'\[iter\s+(\d+)\]', content)
+        # Extract iteration number from [iter N/M] pattern (e.g., [iter 1/3])
+        iter_match = re.search(r'\[iter\s+(\d+)(?:/\d+)?\]', content)
         iteration = int(iter_match.group(1)) if iter_match else expected_iter
 
         # Extract elapsed time (MM:SS format)
@@ -79,7 +79,7 @@ class CaptureSequenceResult:
 class IterationCapture:
     """Helper to capture TUI state at iteration boundaries.
 
-    Polls the tmux session for [iter N] pattern changes
+    Polls the tmux session for [iter N/M] pattern changes
     and captures state at each transition.
     """
 
@@ -105,25 +105,37 @@ class IterationCapture:
         self,
         n: int,
         timeout: float = 60.0,
+        debug: bool = False,
     ) -> Optional[IterationState]:
         """Wait until TUI shows [iter N] and capture state.
 
         Args:
             n: Target iteration number
             timeout: Maximum time to wait (seconds)
+            debug: If True, print debug info about captured content
 
         Returns:
             IterationState if found within timeout, None otherwise
         """
         start_time = asyncio.get_event_loop().time()
+        capture_count = 0
 
         while (asyncio.get_event_loop().time() - start_time) < timeout:
             content = await self.session.capture_pane()
+            capture_count += 1
 
-            # Check for iteration pattern
-            match = re.search(r'\[iter\s+(\d+)\]', content)
+            if debug and capture_count <= 3:
+                # Print first few captures for debugging (show first 3 lines)
+                lines = content.split('\n')[:3] if content else ["(empty)"]
+                for i, line in enumerate(lines):
+                    print(f"[DEBUG] Capture #{capture_count}, line {i}: {line[:100]}")
+
+            # Check for iteration pattern [iter N/M] (e.g., [iter 1/3])
+            match = re.search(r'\[iter\s+(\d+)(?:/\d+)?\]', content)
             if match:
                 current_iter = int(match.group(1))
+                if debug:
+                    print(f"[DEBUG] Found iteration {current_iter}, target {n}")
 
                 if current_iter >= n:
                     # Wait a bit for TUI to stabilize
@@ -133,6 +145,11 @@ class IterationCapture:
                     return IterationState.from_content(content, n)
 
             await asyncio.sleep(self.poll_interval)
+
+        if debug:
+            print(f"[DEBUG] Timeout after {capture_count} captures. Last content first line:")
+            first_line = content.split('\n')[0] if content else "(empty)"
+            print(f"[DEBUG] {first_line[:80]}")
 
         return None
 
@@ -182,14 +199,18 @@ class IterationCapture:
     ) -> tuple[Optional[str], bool]:
         """Wait for Ralph process to terminate.
 
+        Captures the last TUI content (from alternate screen) before exit,
+        rather than returning the shell prompt after exit.
+
         Args:
             timeout: Maximum time to wait (seconds)
             poll_interval: How often to check (seconds)
 
         Returns:
-            Tuple of (final_content, terminated)
+            Tuple of (final_tui_content, terminated)
         """
         start_time = asyncio.get_event_loop().time()
+        last_tui_content = ""  # Track last TUI content (alternate screen)
         last_content = ""
         stable_count = 0
         required_stable = 3  # Require 3 consecutive identical captures
@@ -197,9 +218,27 @@ class IterationCapture:
         while (asyncio.get_event_loop().time() - start_time) < timeout:
             content = await self.session.capture_pane()
 
-            # Check for shell prompt (indicates process ended)
+            # If we got meaningful TUI content (not "no alternate screen" and not shell prompt),
+            # save it as the last TUI content
+            if content.strip() and not content.strip() == "no alternate screen":
+                if not re.search(r'\$\s*$', content.strip()):
+                    last_tui_content = content
+
+            # Check for shell prompt (indicates process ended - TUI has exited)
             if re.search(r'\$\s*$', content.strip()):
-                return content, True
+                # Return the last TUI content we captured, not the shell prompt
+                return last_tui_content if last_tui_content else content, True
+
+            # Check for termination messages in TUI
+            termination_patterns = [
+                r'max iterations',
+                r'Max iterations reached',
+                r'Loop terminated',
+                r'Session completed',
+            ]
+            for pattern in termination_patterns:
+                if re.search(pattern, content, re.IGNORECASE):
+                    return content, True
 
             # Check for stability (no changes)
             if content == last_content:
@@ -212,7 +251,7 @@ class IterationCapture:
 
             await asyncio.sleep(poll_interval)
 
-        return last_content, False
+        return last_tui_content if last_tui_content else last_content, False
 
     async def wait_for_process_exit(
         self,

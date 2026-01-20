@@ -17,8 +17,8 @@ mod sop_runner;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use ralph_adapters::{
-    CliBackend, CliExecutor, ConsoleStreamHandler, PtyConfig, PtyExecutor, QuietStreamHandler,
-    detect_backend,
+    CliBackend, CliExecutor, ConsoleStreamHandler, PrettyStreamHandler, PtyConfig, PtyExecutor,
+    QuietStreamHandler, TuiStreamHandler, detect_backend,
 };
 use ralph_core::{
     EventHistory, EventLogger, EventLoop, EventParser, EventRecord, RalphConfig, Record,
@@ -277,13 +277,13 @@ struct RunArgs {
     // ─────────────────────────────────────────────────────────────────────────
     // Execution Mode Options
     // ─────────────────────────────────────────────────────────────────────────
-    /// Enable interactive TUI mode for real-time monitoring
-    #[arg(short, long, conflicts_with = "autonomous")]
-    interactive: bool,
+    /// Enable TUI observation mode for real-time monitoring
+    #[arg(long, conflicts_with = "autonomous")]
+    tui: bool,
 
     /// Force autonomous mode (headless, non-interactive).
     /// Overrides default_mode from config.
-    #[arg(short, long, conflicts_with = "interactive")]
+    #[arg(short, long, conflicts_with = "tui")]
     autonomous: bool,
 
     /// Idle timeout in seconds for interactive mode (default: 30).
@@ -306,10 +306,6 @@ struct RunArgs {
     /// Record session to JSONL file for replay testing
     #[arg(long, value_name = "FILE")]
     record_session: Option<PathBuf>,
-
-    /// [DEPRECATED] Use -i/--interactive instead
-    #[arg(long, hide = true)]
-    tui: bool,
 }
 
 /// Arguments for the resume subcommand.
@@ -322,15 +318,15 @@ struct ResumeArgs {
     #[arg(long)]
     max_iterations: Option<u32>,
 
-    /// Enable interactive TUI mode for real-time monitoring
-    #[arg(short, long, conflicts_with = "autonomous")]
-    interactive: bool,
+    /// Enable TUI observation mode for real-time monitoring
+    #[arg(long, conflicts_with = "autonomous")]
+    tui: bool,
 
     /// Force autonomous mode
-    #[arg(short, long, conflicts_with = "interactive")]
+    #[arg(short, long, conflicts_with = "tui")]
     autonomous: bool,
 
-    /// Idle timeout in seconds for interactive mode
+    /// Idle timeout in seconds for TUI mode
     #[arg(long)]
     idle_timeout: Option<u32>,
 
@@ -345,10 +341,6 @@ struct ResumeArgs {
     /// Record session to JSONL file for replay testing
     #[arg(long, value_name = "FILE")]
     record_session: Option<PathBuf>,
-
-    /// [DEPRECATED] Use -i/--interactive instead
-    #[arg(long, hide = true)]
-    tui: bool,
 }
 
 /// Arguments for the events subcommand.
@@ -450,9 +442,33 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Initialize logging
+    // Detect if TUI mode is requested - TUI owns the terminal, so logs must not go to stdout
+    let tui_enabled = match &cli.command {
+        Some(Commands::Run(args)) => args.tui,
+        Some(Commands::Resume(args)) => args.tui,
+        _ => false,
+    };
+
+    // Initialize logging - suppress in TUI mode to avoid corrupting the display
     let filter = if cli.verbose { "debug" } else { "info" };
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    if tui_enabled {
+        // TUI mode: logs would corrupt the display, so we suppress them entirely.
+        // For debugging TUI issues, set RALPH_DEBUG_LOG=1 to write to .agent/ralph.log
+        if std::env::var("RALPH_DEBUG_LOG").is_ok() {
+            let log_path = std::path::Path::new(".agent").join("ralph.log");
+            if let Ok(file) = std::fs::File::create(&log_path) {
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_ansi(false)
+                    .init();
+            }
+        }
+        // If RALPH_DEBUG_LOG is not set or file creation fails, no logging (default)
+    } else {
+        // Normal mode: logs go to stdout
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
 
     match cli.command {
         Some(Commands::Run(args)) => run_command(cli.config, cli.verbose, cli.color, args).await,
@@ -473,13 +489,12 @@ async fn main() -> Result<()> {
                 max_iterations: None,
                 completion_promise: None,
                 dry_run: false,
-                interactive: false,
+                tui: false,
                 autonomous: false,
                 idle_timeout: None,
                 verbose: false,
                 quiet: false,
                 record_session: None,
-                tui: false, // No TUI by default
             };
             run_command(cli.config, cli.verbose, cli.color, args).await
         }
@@ -492,11 +507,6 @@ async fn run_command(
     color_mode: ColorMode,
     args: RunArgs,
 ) -> Result<()> {
-    // Show deprecation warning if --tui is used
-    if args.tui {
-        eprintln!("⚠️  Warning: --tui flag is deprecated. Use -i or --interactive instead.");
-    }
-
     // Load configuration
     let mut config = if config_path.exists() {
         RalphConfig::from_file(&config_path)
@@ -531,7 +541,7 @@ async fn run_command(
     // Apply execution mode overrides per spec
     if args.autonomous {
         config.cli.default_mode = "autonomous".to_string();
-    } else if args.interactive {
+    } else if args.tui {
         config.cli.default_mode = "interactive".to_string();
     }
 
@@ -610,7 +620,7 @@ async fn run_command(
     }
 
     // Run the orchestration loop and exit with proper exit code
-    let enable_tui = args.interactive || args.tui; // Support both for backward compat
+    let enable_tui = args.tui;
     let verbosity = Verbosity::resolve(verbose || args.verbose, args.quiet);
     let reason = run_loop(
         config,
@@ -641,11 +651,6 @@ async fn resume_command(
     color_mode: ColorMode,
     args: ResumeArgs,
 ) -> Result<()> {
-    // Show deprecation warning if --tui is used
-    if args.tui {
-        eprintln!("⚠️  Warning: --tui flag is deprecated. Use -i or --interactive instead.");
-    }
-
     // Load configuration
     let mut config = if config_path.exists() {
         RalphConfig::from_file(&config_path)
@@ -676,10 +681,10 @@ async fn resume_command(
         config.verbose = true;
     }
 
-    // Apply PTY mode overrides
+    // Apply execution mode overrides
     if args.autonomous {
         config.cli.default_mode = "autonomous".to_string();
-    } else if args.interactive {
+    } else if args.tui {
         config.cli.default_mode = "interactive".to_string();
     }
 
@@ -718,7 +723,7 @@ async fn resume_command(
     // Run the orchestration loop in resume mode
     // The key difference: we publish task.resume instead of task.start,
     // signaling the planner to read the existing scratchpad
-    let enable_tui = args.interactive || args.tui; // Support both for backward compat
+    let enable_tui = args.tui;
     let verbosity = Verbosity::resolve(verbose || args.verbose, args.quiet);
     let reason = run_loop_impl(
         config,
@@ -1454,17 +1459,10 @@ async fn run_loop_impl(
 
     // Determine effective execution mode (with fallback logic)
     // Per spec: Claude backend requires PTY mode to avoid hangs
-    let interactive_requested = config.cli.default_mode == "interactive" || enable_tui;
+    // TUI mode is observation-only - uses streaming mode, not interactive
+    let interactive_requested = config.cli.default_mode == "interactive" && !enable_tui;
     let user_interactive = if interactive_requested {
-        // Check if experimental_tui is enabled
-        if !config.cli.experimental_tui {
-            warn!(
-                "Interactive TUI mode is experimental and disabled by default. \
-                To enable, set `cli.experimental_tui: true` in your config. \
-                Falling back to autonomous mode."
-            );
-            false
-        } else if stdout().is_terminal() {
+        if stdout().is_terminal() {
             true
         } else {
             warn!("Interactive mode requested but stdout is not a TTY, falling back to autonomous");
@@ -1511,7 +1509,7 @@ async fn run_loop_impl(
     // Spawn task to listen for SIGHUP (Unix only)
     #[cfg(unix)]
     {
-        let interrupt_tx_sighup = interrupt_tx;
+        let interrupt_tx_sighup = interrupt_tx.clone();
         tokio::spawn(async move {
             let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
                 .expect("Failed to register SIGHUP handler");
@@ -1582,14 +1580,9 @@ async fn run_loop_impl(
         warn!("Failed to log start event: {}", e);
     }
 
-    // Create backend - use TUI mode for Claude when TUI is enabled
-    // This switches from `-p` with stream-json to positional arg without stream-json,
-    // allowing Claude's native TUI to render properly.
-    let backend = if enable_tui && config.cli.backend == "claude" {
-        CliBackend::claude_tui()
-    } else {
-        CliBackend::from_config(&config.cli).map_err(|e| anyhow::Error::new(e))?
-    };
+    // Create backend from config - TUI mode uses the same backend as non-TUI
+    // The TUI is an observation layer that displays output, not a different mode
+    let backend = CliBackend::from_config(&config.cli).map_err(|e| anyhow::Error::new(e))?;
 
     // Create PTY executor if using interactive mode
     let mut pty_executor = if use_pty {
@@ -1608,40 +1601,44 @@ async fn run_loop_impl(
         None
     };
 
-    // Wire TUI to PTY executor if both are enabled
-    let enable_tui = enable_tui && user_interactive && pty_executor.is_some();
-    let tui_handle = if enable_tui {
-        let mut tui = Tui::new();
+    // Create termination signal for TUI shutdown
+    let (terminated_tx, terminated_rx) = tokio::sync::watch::channel(false);
 
-        // Parse and apply TUI prefix key configuration
-        match config.tui.parse_prefix() {
-            Ok((key_code, key_modifiers)) => {
-                tui = tui.with_prefix(key_code, key_modifiers);
-            }
-            Err(e) => {
-                error!("Invalid TUI prefix_key configuration: {}", e);
-                return Err(anyhow::anyhow!("Invalid TUI prefix_key: {}", e));
-            }
-        }
-
+    // Wire TUI with termination signal and shared state
+    // TUI is observation-only - works in both interactive and autonomous modes
+    // Only requirement: stdout must be a terminal for TUI to render
+    let enable_tui = enable_tui && stdout().is_terminal();
+    let (mut tui_handle, tui_state) = if enable_tui {
         // Build hat map for dynamic topic-to-hat resolution
         // This allows TUI to display custom hats (e.g., "🔒 Security Reviewer")
         // instead of generic "ralph" for all events
         let hat_map = build_tui_hat_map(event_loop.registry());
-        tui = tui.with_hat_map(hat_map);
+        let tui = Tui::new()
+            .with_hat_map(hat_map)
+            .with_termination_signal(terminated_rx);
 
-        // Wire PTY handle to TUI
-        if let Some(ref mut executor) = pty_executor {
-            let pty_handle = executor.handle();
-            tui = tui.with_pty(pty_handle);
-        }
+        // Get shared state before spawning (for content streaming)
+        let state = tui.state();
+
+        // Wire interrupt channel so TUI can signal main loop on Ctrl+C
+        // (raw mode prevents SIGINT from being generated by the OS)
+        let tui = tui.with_interrupt_tx(interrupt_tx.clone());
 
         let observer = tui.observer();
         event_loop.add_observer(observer);
-        Some(tokio::spawn(async move { tui.run().await }))
+        (
+            Some(tokio::spawn(async move { tui.run().await })),
+            Some(state),
+        )
     } else {
-        None
+        (None, None)
     };
+
+    // Give TUI task time to initialize (enter alternate screen, enable raw mode)
+    // before the main loop starts doing work
+    if tui_handle.is_some() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     // Log execution mode - hat info already logged by initialize()
     let exec_mode = if user_interactive {
@@ -1679,19 +1676,43 @@ async fn run_loop_impl(
             warn!("Failed to write summary file: {}", e);
         }
 
-        // Print termination info to console
-        print_termination(reason, state, use_colors);
-    };
-
-    // Helper closure to clean up TUI task on exit
-    let cleanup_tui = |tui_handle: Option<tokio::task::JoinHandle<Result<()>>>| {
-        if let Some(handle) = tui_handle {
-            handle.abort();
+        // Print termination info to console (skip in TUI mode - TUI handles display)
+        if !enable_tui {
+            print_termination(reason, state, use_colors);
         }
     };
 
     // Main orchestration loop
     loop {
+        // Check for interrupt signal at start of each iteration
+        // This catches TUI Ctrl+C (via interrupt_tx) before printing iteration separator
+        if *interrupt_rx.borrow() {
+            #[cfg(unix)]
+            {
+                use nix::sys::signal::{Signal, killpg};
+                use nix::unistd::getpgrp;
+                let pgid = getpgrp();
+                debug!(
+                    "Interrupt detected at loop start, sending SIGTERM to process group {}",
+                    pgid
+                );
+                let _ = killpg(pgid, Signal::SIGTERM);
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let _ = killpg(pgid, Signal::SIGKILL);
+            }
+            let reason = TerminationReason::Interrupted;
+            let terminate_event = event_loop.publish_terminate_event(&reason);
+            log_terminate_event(
+                &mut event_logger,
+                event_loop.state().iteration,
+                &terminate_event,
+            );
+            handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
+            // Signal TUI to exit immediately on interrupt
+            let _ = terminated_tx.send(true);
+            return Ok(reason);
+        }
+
         // Check termination before execution
         if let Some(reason) = event_loop.check_termination() {
             // Per spec: Publish loop.terminate event to observers
@@ -1702,7 +1723,10 @@ async fn run_loop_impl(
                 &terminate_event,
             );
             handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
-            cleanup_tui(tui_handle);
+            // Wait for user to exit TUI (press 'q') on natural completion
+            if let Some(handle) = tui_handle.take() {
+                let _ = handle.await;
+            }
             return Ok(reason);
         }
 
@@ -1732,7 +1756,10 @@ async fn run_loop_impl(
                         &terminate_event,
                     );
                     handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
-                    cleanup_tui(tui_handle);
+                    // Wait for user to exit TUI (press 'q') on natural completion
+                    if let Some(handle) = tui_handle.take() {
+                        let _ = handle.await;
+                    }
                     return Ok(reason);
                 }
 
@@ -1756,7 +1783,10 @@ async fn run_loop_impl(
                     &terminate_event,
                 );
                 handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
-                cleanup_tui(tui_handle);
+                // Wait for user to exit TUI (press 'q') on natural completion
+                if let Some(handle) = tui_handle.take() {
+                    let _ = handle.await;
+                }
                 return Ok(reason);
             }
         };
@@ -1774,20 +1804,26 @@ async fn run_loop_impl(
         // Per spec: Print iteration demarcation separator
         // "Each iteration must be clearly demarcated in the output so users can
         // visually distinguish where one iteration ends and another begins."
-        print_iteration_separator(
-            iteration,
-            display_hat.as_str(),
-            event_loop.state().elapsed(),
-            config.event_loop.max_iterations,
-            use_colors,
-        );
+        // Skip when TUI is enabled - TUI has its own header showing iteration info
+        if tui_state.is_none() {
+            print_iteration_separator(
+                iteration,
+                display_hat.as_str(),
+                event_loop.state().elapsed(),
+                config.event_loop.max_iterations,
+                use_colors,
+            );
+        }
 
         // Log hat changes with appropriate messaging
+        // Skip in TUI mode - TUI shows hat info in header, and stdout would corrupt display
         if last_hat.as_ref() != Some(&hat_id) {
-            if hat_id.as_str() == "ralph" {
-                info!("I'm Ralph. Let's do this.");
-            } else {
-                info!("Putting on my {} hat.", hat_id);
+            if tui_state.is_none() {
+                if hat_id.as_str() == "ralph" {
+                    info!("I'm Ralph. Let's do this.");
+                } else {
+                    info!("Putting on my {} hat.", hat_id);
+                }
             }
             last_hat = Some(hat_id.clone());
         }
@@ -1819,9 +1855,26 @@ async fn run_loop_impl(
         let timeout_secs = config.adapter_settings(&config.cli.backend).timeout;
         let timeout = Some(Duration::from_secs(timeout_secs));
 
+        // For TUI mode, get the shared lines buffer for this iteration.
+        // The buffer is owned by TuiState's IterationBuffer, so writes from
+        // TuiStreamHandler appear immediately in the TUI (real-time streaming).
+        let tui_lines: Option<Arc<std::sync::Mutex<Vec<ratatui::text::Line<'static>>>>> =
+            if let Some(ref state) = tui_state {
+                // Start new iteration and get handle to its lines buffer
+                if let Ok(mut s) = state.lock() {
+                    s.start_new_iteration();
+                    s.current_iteration_lines_handle()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
         // Race execution against interrupt signal for immediate termination on Ctrl+C
         let mut interrupt_rx_clone = interrupt_rx.clone();
         let interrupt_rx_for_pty = interrupt_rx.clone();
+        let tui_lines_for_pty = tui_lines.clone();
         let execute_future = async {
             if use_pty {
                 execute_pty(
@@ -1832,6 +1885,7 @@ async fn run_loop_impl(
                     user_interactive,
                     interrupt_rx_for_pty,
                     verbosity,
+                    tui_lines_for_pty,
                 )
                 .await
             } else {
@@ -1868,7 +1922,8 @@ async fn run_loop_impl(
                 let terminate_event = event_loop.publish_terminate_event(&reason);
                 log_terminate_event(&mut event_logger, event_loop.state().iteration, &terminate_event);
                 handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
-                cleanup_tui(tui_handle);
+                // Signal TUI to exit immediately on interrupt
+                let _ = terminated_tx.send(true);
                 return Ok(reason);
             }
         };
@@ -1881,12 +1936,18 @@ async fn run_loop_impl(
                 &terminate_event,
             );
             handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
-            cleanup_tui(tui_handle);
+            // Wait for user to exit TUI (press 'q') on natural completion
+            if let Some(handle) = tui_handle.take() {
+                let _ = handle.await;
+            }
             return Ok(reason);
         }
 
         let output = outcome.output;
         let success = outcome.success;
+
+        // Note: TUI lines are now written directly to IterationBuffer during streaming,
+        // so no post-execution transfer is needed.
 
         // Log events from output before processing
         log_events_from_output(
@@ -1914,7 +1975,10 @@ async fn run_loop_impl(
                 &terminate_event,
             );
             handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
-            cleanup_tui(tui_handle);
+            // Wait for user to exit TUI (press 'q') on natural completion
+            if let Some(handle) = tui_handle.take() {
+                let _ = handle.await;
+            }
             return Ok(reason);
         }
 
@@ -1996,10 +2060,13 @@ async fn execute_pty(
     interactive: bool,
     interrupt_rx: tokio::sync::watch::Receiver<bool>,
     verbosity: Verbosity,
+    tui_lines: Option<Arc<std::sync::Mutex<Vec<ratatui::text::Line<'static>>>>>,
 ) -> Result<ExecutionOutcome> {
     use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
     // Use provided executor or create a new one
+    // If executor is provided, TUI is connected and owns raw mode management
+    let tui_connected = executor.is_some();
     let mut temp_executor;
     let exec = if let Some(e) = executor {
         e
@@ -2018,21 +2085,36 @@ async fn execute_pty(
         &mut temp_executor
     };
 
+    // Set TUI mode flag when TUI is connected (tui_lines is Some)
+    // This replaces the broken output_rx.is_none() detection in PtyExecutor
+    if tui_lines.is_some() {
+        exec.set_tui_mode(true);
+    }
+
     // Enter raw mode for interactive mode to capture keystrokes
-    if interactive {
+    // Skip if TUI is connected - TUI owns raw mode and will manage it
+    if interactive && !tui_connected {
         enable_raw_mode().context("Failed to enable raw mode")?;
     }
 
     // Use scopeguard to ensure raw mode is restored on any exit path
-    let _guard = scopeguard::guard(interactive, |is_interactive| {
-        if is_interactive {
+    // Skip if TUI is connected - TUI owns raw mode
+    let _guard = scopeguard::guard((interactive, tui_connected), |(is_interactive, tui)| {
+        if is_interactive && !tui {
             let _ = disable_raw_mode();
         }
     });
 
     // Run PTY executor with shared interrupt channel
-    let result = if interactive {
+    let result = if interactive && tui_lines.is_none() {
+        // Raw interactive mode only when not using TUI (TUI handles its own terminal)
         exec.run_interactive(prompt, interrupt_rx).await
+    } else if let Some(lines) = tui_lines {
+        // TUI mode: use TuiStreamHandler to capture output for TUI display
+        let verbose = verbosity == Verbosity::Verbose;
+        let mut handler = TuiStreamHandler::with_lines(verbose, lines);
+        exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
+            .await
     } else {
         // Use streaming handler for non-interactive mode (respects verbosity)
         match verbosity {
@@ -2042,14 +2124,26 @@ async fn execute_pty(
                     .await
             }
             Verbosity::Normal => {
-                let mut handler = ConsoleStreamHandler::new(false);
-                exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
-                    .await
+                if stdout().is_terminal() {
+                    let mut handler = PrettyStreamHandler::new(false);
+                    exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
+                        .await
+                } else {
+                    let mut handler = ConsoleStreamHandler::new(false);
+                    exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
+                        .await
+                }
             }
             Verbosity::Verbose => {
-                let mut handler = ConsoleStreamHandler::new(true);
-                exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
-                    .await
+                if stdout().is_terminal() {
+                    let mut handler = PrettyStreamHandler::new(true);
+                    exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
+                        .await
+                } else {
+                    let mut handler = ConsoleStreamHandler::new(true);
+                    exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
+                        .await
+                }
             }
         }
     };

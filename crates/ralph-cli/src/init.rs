@@ -16,7 +16,9 @@ pub enum InitError {
     #[error("Unknown preset '{0}'. Available presets: {1}")]
     UnknownPreset(String, String),
 
-    #[error("Unknown backend '{0}'. Valid backends: claude, kiro, gemini, codex, amp, custom")]
+    #[error(
+        "Unknown backend '{0}'. Valid backends: claude, kiro, gemini, codex, amp, copilot, opencode, custom"
+    )]
     UnknownBackend(String),
 
     #[error("Failed to write ralph.yml: {0}")]
@@ -27,7 +29,9 @@ pub enum InitError {
 }
 
 /// Valid backend names.
-const VALID_BACKENDS: &[&str] = &["claude", "kiro", "gemini", "codex", "amp", "custom"];
+const VALID_BACKENDS: &[&str] = &[
+    "claude", "kiro", "gemini", "codex", "amp", "copilot", "opencode", "custom",
+];
 
 /// Generates the minimal config template for a given backend.
 fn generate_template(backend: &str) -> String {
@@ -82,7 +86,7 @@ fn check_file_exists(force: bool) -> Result<(), InitError> {
 /// Initializes ralph.yml from a minimal backend template.
 ///
 /// # Arguments
-/// * `backend` - The backend name (claude, kiro, gemini, codex, amp, custom)
+/// * `backend` - The backend name (claude, kiro, gemini, codex, amp, copilot, opencode, custom)
 /// * `force` - If true, overwrite existing ralph.yml
 ///
 /// # Errors

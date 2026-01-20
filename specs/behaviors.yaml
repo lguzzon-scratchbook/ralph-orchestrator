@@ -24,13 +24,13 @@
 #   - Add new behaviors when implementing new features
 #   - Remove behaviors when deprecating features
 
-interactive-mode:
-  spec: interactive-mode.spec.md
+tui-mode:
+  spec: tui-mode.spec.md
   behaviors:
     # CLI Flag Existence
-    - name: "-i/--interactive flag exists"
+    - name: "--tui flag exists"
       type: cli-flag
-      run: ${RALPH_BIN:-ralph} run --help | grep -qE '^\s+-i, --interactive'
+      run: ${RALPH_BIN:-ralph} run --help | grep -q -- '--tui'
 
     - name: "-a/--autonomous flag exists"
       type: cli-flag
@@ -41,18 +41,18 @@ interactive-mode:
       run: ${RALPH_BIN:-ralph} run --help | grep -q -- '--idle-timeout'
 
     # Flag Acceptance (parsing works)
-    - name: "-i and -a are mutually exclusive"
+    - name: "--tui and -a are mutually exclusive"
       type: cli-flag
-      run: ${RALPH_BIN:-ralph} run -i -a --dry-run 2>&1 | grep -qi 'cannot be used with\|conflict'
+      run: ${RALPH_BIN:-ralph} run --tui -a --dry-run 2>&1 | grep -qi 'cannot be used with\|conflict'
 
     - name: "--idle-timeout accepts numeric value"
       type: cli-flag
       run: ${RALPH_BIN:-ralph} run --idle-timeout 60 --dry-run 2>&1 | grep -qv 'error\|invalid'
 
     # Resume command flags
-    - name: "resume command has -i flag"
+    - name: "resume command has --tui flag"
       type: cli-flag
-      run: ${RALPH_BIN:-ralph} resume --help | grep -qE '^\s+-i, --interactive'
+      run: ${RALPH_BIN:-ralph} resume --help | grep -q -- '--tui'
 
     - name: "resume command has -a flag"
       type: cli-flag
@@ -845,11 +845,11 @@ behavioral-verification:
         echo "Skip: Requires cassette/mock backend execution"
         exit 0
 
-    - name: "E2E-007: Interactive mode behavior"
+    - name: "E2E-007: TUI mode behavior"
       type: runtime
       skip_ci: true
       run: |
-        # Requires cassette: TTY attached, permission prompts work
+        # Requires cassette: --tui flag, TUI renders correctly
         echo "Skip: Requires cassette/mock backend execution"
         exit 0
 

@@ -74,7 +74,7 @@ tools/e2e/
 ```
 1. Build Ralph (if needed)
 2. Create tmux session
-3. Start Ralph: `ralph run -i --idle-timeout 5 -c ralph.yml -p "Say hello"`
+3. Start Ralph: `ralph run --tui --idle-timeout 5 -c ralph.yml -p "Say hello"`
 4. Wait for initial output (Claude responds)
 5. Wait for idle timeout to trigger (~5-7 seconds after last output)
 6. Capture TUI state with freeze

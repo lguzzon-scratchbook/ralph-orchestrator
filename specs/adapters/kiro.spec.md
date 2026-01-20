@@ -38,7 +38,7 @@ The `--no-interactive` flag disables confirmation prompts and causes kiro-cli to
 kiro-cli chat --no-interactive --trust-all-tools "your prompt"
 ```
 
-### Interactive Mode (`ralph run -i`)
+### TUI Mode (`ralph run --tui`)
 
 ```bash
 kiro-cli chat --trust-all-tools "your prompt"

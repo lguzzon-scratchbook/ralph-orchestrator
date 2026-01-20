@@ -1,53 +1,110 @@
-use crate::state::{LoopMode, TuiState};
+use crate::state::TuiState;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
 
-pub fn render(state: &TuiState) -> Paragraph<'static> {
+// ============================================================================
+// Width Breakpoints for Priority-Based Progressive Disclosure
+// ============================================================================
+// At narrower widths, lower-priority components are hidden or compressed.
+//
+// Priority levels (lower number = more important, always shown):
+// - Priority 1: Iteration counter [iter N/M] - always shown (TUI pagination)
+// - Priority 2: Mode indicator [LIVE]/[REVIEW] (▶/◀ compressed) - always shown
+// - Priority 3: Hat display, Scroll indicator - compressed at 50
+// - Priority 4: Elapsed time MM:SS - hidden at 50
+// - Priority 5: Idle countdown - hidden at 40
+// - Priority 6: Help hint - hidden at 65
+// ============================================================================
+
+/// Width breakpoint constants
+const WIDTH_FULL: u16 = 80; // Show everything including help hint
+#[allow(dead_code)] // Kept for documentation of breakpoint tiers
+const WIDTH_HIDE_HELP: u16 = 65; // Below this: help hint hidden
+const WIDTH_COMPRESS: u16 = 50; // Compress mode/hat, hide time
+const WIDTH_MINIMAL: u16 = 40; // Hide idle countdown
+
+/// Renders the header widget with priority-based progressive disclosure.
+///
+/// At narrower terminal widths, lower-priority components are hidden or compressed
+/// to ensure critical information (iteration, mode) remains visible.
+pub fn render(state: &TuiState, width: u16) -> Paragraph<'static> {
     let mut spans = vec![];
 
-    // [iter N/M] or [iter N]
-    let iter_display = if let Some(max) = state.max_iterations {
-        format!("[iter {}/{}]", state.iteration + 1, max)
-    } else {
-        format!("[iter {}]", state.iteration + 1)
-    };
+    // Priority 1: Iteration counter - ALWAYS shown
+    // Uses TUI pagination state (current_view/total_iterations) not Ralph loop iteration
+    let current = state.current_view + 1; // 0-indexed to 1-indexed
+    let total = state.total_iterations();
+    let iter_display = format!("[iter {}/{}]", current, total);
     spans.push(Span::raw(iter_display));
 
-    // MM:SS elapsed time
-    if let Some(elapsed) = state.get_loop_elapsed() {
+    // Priority 4: Elapsed time - hidden at WIDTH_COMPRESS and below
+    if let Some(elapsed) = state.get_loop_elapsed()
+        && width > WIDTH_COMPRESS
+    {
         let total_secs = elapsed.as_secs();
         let mins = total_secs / 60;
         let secs = total_secs % 60;
         spans.push(Span::raw(format!(" {mins:02}:{secs:02}")));
     }
 
-    // | 🎯 Hat
+    // Priority 3: Hat display - compressed at WIDTH_COMPRESS and below
     spans.push(Span::raw(" | "));
-    spans.push(Span::raw(state.get_pending_hat_display()));
+    if width > WIDTH_COMPRESS {
+        // Full hat display: "🔨 Builder"
+        spans.push(Span::raw(state.get_pending_hat_display()));
+    } else {
+        // Compressed: emoji only (first character cluster)
+        let hat_display = state.get_pending_hat_display();
+        let emoji = hat_display.chars().next().unwrap_or('?');
+        spans.push(Span::raw(emoji.to_string()));
+    }
 
-    // idle: Ns (only if Some)
-    if let Some(idle) = state.idle_timeout_remaining {
+    // Priority 5: Idle countdown - hidden at WIDTH_MINIMAL and below
+    if let Some(idle) = state.idle_timeout_remaining
+        && width > WIDTH_MINIMAL
+    {
         spans.push(Span::raw(format!(" | idle: {}s", idle.as_secs())));
     }
 
-    // | ▶ auto / ⏸ paused
+    // Priority 2: Mode indicator - ALWAYS shown (compressed at WIDTH_COMPRESS and below)
+    // Shows [LIVE] when following latest iteration, [REVIEW] when viewing history
     spans.push(Span::raw(" | "));
-    let mode = match state.loop_mode {
-        LoopMode::Auto => Span::styled("▶ auto", Style::default().fg(Color::Green)),
-        LoopMode::Paused => Span::styled("⏸ paused", Style::default().fg(Color::Yellow)),
+    let mode = if state.following_latest {
+        if width > WIDTH_COMPRESS {
+            Span::styled("[LIVE]", Style::default().fg(Color::Green))
+        } else {
+            Span::styled("▶", Style::default().fg(Color::Green))
+        }
+    } else if width > WIDTH_COMPRESS {
+        Span::styled("[REVIEW]", Style::default().fg(Color::Yellow))
+    } else {
+        Span::styled("◀", Style::default().fg(Color::Yellow))
     };
     spans.push(mode);
 
-    // [SCROLL] indicator
+    // Priority 3: Scroll indicator - compressed at WIDTH_COMPRESS and below
     if state.in_scroll_mode {
-        spans.push(Span::styled(" [SCROLL]", Style::default().fg(Color::Cyan)));
+        if width > WIDTH_COMPRESS {
+            spans.push(Span::styled(" [SCROLL]", Style::default().fg(Color::Cyan)));
+        } else {
+            spans.push(Span::styled(" [S]", Style::default().fg(Color::Cyan)));
+        }
+    }
+
+    // Priority 6: Help hint - shown only at WIDTH_FULL (80+)
+    if width >= WIDTH_FULL {
+        spans.push(Span::styled(
+            " | ? help",
+            Style::default().fg(Color::DarkGray),
+        ));
     }
 
     let line = Line::from(spans);
-    Paragraph::new(line).block(Block::default().borders(Borders::ALL))
+    let block = Block::default().borders(Borders::BOTTOM);
+    Paragraph::new(line).block(block)
 }
 
 #[cfg(test)]
@@ -59,12 +116,17 @@ mod tests {
     use std::time::Duration;
 
     fn render_to_string(state: &TuiState) -> String {
-        let backend = TestBackend::new(80, 3);
+        render_to_string_with_width(state, 80)
+    }
+
+    fn render_to_string_with_width(state: &TuiState, width: u16) -> String {
+        // Height of 2: 1 for content + 1 for bottom border
+        let backend = TestBackend::new(width, 2);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
             .draw(|f| {
-                let widget = render(state);
+                let widget = render(state, width);
                 f.render_widget(widget, f.area());
             })
             .unwrap();
@@ -78,29 +140,35 @@ mod tests {
     }
 
     #[test]
-    fn header_shows_iteration_without_max() {
+    fn header_shows_iteration_position() {
+        // Now uses TUI pagination state (current_view/total_iterations)
         let mut state = TuiState::new();
-        state.iteration = 2;
-        state.max_iterations = None;
+        state.start_new_iteration();
+        state.start_new_iteration();
+        state.start_new_iteration();
+        state.current_view = 2; // Viewing iteration 3
 
         let text = render_to_string(&state);
         assert!(
-            text.contains("[iter 3]"),
-            "should show [iter 3], got: {}",
+            text.contains("[iter 3/3]"),
+            "should show [iter 3/3], got: {}",
             text
         );
     }
 
     #[test]
-    fn header_shows_iteration_with_max() {
+    fn header_shows_iteration_at_first() {
+        // Viewing first of multiple iterations
         let mut state = TuiState::new();
-        state.iteration = 2;
-        state.max_iterations = Some(10);
+        state.start_new_iteration();
+        state.start_new_iteration();
+        state.start_new_iteration();
+        state.current_view = 0; // Viewing first iteration
 
         let text = render_to_string(&state);
         assert!(
-            text.contains("[iter 3/10]"),
-            "should show [iter 3/10], got: {}",
+            text.contains("[iter 1/3]"),
+            "should show [iter 1/3], got: {}",
             text
         );
     }
@@ -158,32 +226,6 @@ mod tests {
     }
 
     #[test]
-    fn header_shows_auto_mode() {
-        let mut state = TuiState::new();
-        state.loop_mode = LoopMode::Auto;
-
-        let text = render_to_string(&state);
-        assert!(
-            text.contains("▶ auto"),
-            "should show auto mode, got: {}",
-            text
-        );
-    }
-
-    #[test]
-    fn header_shows_paused_mode() {
-        let mut state = TuiState::new();
-        state.loop_mode = LoopMode::Paused;
-
-        let text = render_to_string(&state);
-        assert!(
-            text.contains("⏸ paused"),
-            "should show paused mode, got: {}",
-            text
-        );
-    }
-
-    #[test]
     fn header_shows_scroll_indicator() {
         let mut state = TuiState::new();
         state.in_scroll_mode = true;
@@ -202,8 +244,13 @@ mod tests {
         let event = Event::new("task.start", "");
         state.update(&event);
 
-        state.iteration = 2;
-        state.max_iterations = Some(10);
+        // Set up TUI pagination state (10 iterations, viewing iteration 3)
+        for _ in 0..10 {
+            state.start_new_iteration();
+        }
+        state.current_view = 2; // Viewing iteration 3 of 10
+        state.following_latest = true;
+
         state.loop_started = Some(
             std::time::Instant::now()
                 .checked_sub(Duration::from_secs(272))
@@ -211,7 +258,6 @@ mod tests {
         );
         state.pending_hat = Some((HatId::new("builder"), "🔨Builder".to_string()));
         state.idle_timeout_remaining = Some(Duration::from_secs(25));
-        state.loop_mode = LoopMode::Auto;
         state.in_scroll_mode = true;
 
         let text = render_to_string(&state);
@@ -233,10 +279,296 @@ mod tests {
             "missing idle countdown, got: {}",
             text
         );
-        assert!(text.contains("▶ auto"), "missing mode, got: {}", text);
+        assert!(text.contains("[LIVE]"), "missing mode, got: {}", text);
         assert!(
             text.contains("[SCROLL]"),
             "missing scroll indicator, got: {}",
+            text
+        );
+        assert!(
+            text.contains("? help"),
+            "missing help hint at width 80, got: {}",
+            text
+        );
+    }
+
+    // =========================================================================
+    // Priority-Based Progressive Disclosure Tests
+    // =========================================================================
+
+    fn create_full_state() -> TuiState {
+        let mut state = TuiState::new();
+        let event = Event::new("task.start", "");
+        state.update(&event);
+
+        // Set up TUI pagination state (10 iterations, viewing iteration 3)
+        for _ in 0..10 {
+            state.start_new_iteration();
+        }
+        state.current_view = 2; // Viewing iteration 3 of 10
+        state.following_latest = true; // In LIVE mode
+
+        state.loop_started = Some(
+            std::time::Instant::now()
+                .checked_sub(Duration::from_secs(272))
+                .unwrap(),
+        );
+        state.pending_hat = Some((HatId::new("builder"), "🔨Builder".to_string()));
+        state.idle_timeout_remaining = Some(Duration::from_secs(25));
+        state.in_scroll_mode = true;
+        state
+    }
+
+    #[test]
+    fn header_at_80_chars_shows_help_hint() {
+        // At 80+ chars, help hint should be visible
+        let state = create_full_state();
+        let text = render_to_string_with_width(&state, 80);
+
+        // Should contain help hint
+        assert!(
+            text.contains("? help"),
+            "help hint should be visible at 80 chars, got: {}",
+            text
+        );
+
+        // Should still show all other components
+        assert!(
+            text.contains("[iter 3/10]"),
+            "iteration should be visible, got: {}",
+            text
+        );
+        assert!(
+            text.contains("[LIVE]"),
+            "mode should be visible, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn header_at_65_chars_hides_help() {
+        // At 65 chars, help hint should be hidden but everything else visible
+        let state = create_full_state();
+        let text = render_to_string_with_width(&state, 65);
+
+        // Should NOT contain help hint
+        assert!(
+            !text.contains("? help"),
+            "help hint should be hidden at 65 chars, got: {}",
+            text
+        );
+
+        // Should still show core components
+        assert!(
+            text.contains("[iter 3/10]"),
+            "iteration should be visible, got: {}",
+            text
+        );
+        assert!(
+            text.contains("[LIVE]"),
+            "mode should be visible (not compressed), got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn header_at_50_chars_compresses_mode() {
+        // At 50 chars, mode should be compressed to icon only
+        let state = create_full_state();
+        let text = render_to_string_with_width(&state, 50);
+
+        // Mode should be compressed: "[LIVE]" -> "▶"
+        // Should have the icon but not "[LIVE]"
+        assert!(
+            text.contains('▶'),
+            "mode icon should be visible, got: {}",
+            text
+        );
+        assert!(
+            !text.contains("[LIVE]"),
+            "mode text '[LIVE]' should be hidden at 50 chars, got: {}",
+            text
+        );
+
+        // Time should be hidden at 50 chars
+        assert!(
+            !text.contains("04:32"),
+            "elapsed time should be hidden at 50 chars, got: {}",
+            text
+        );
+
+        // Iteration should always be visible
+        assert!(
+            text.contains("[iter 3/10]"),
+            "iteration should be visible, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn header_at_40_chars_minimal() {
+        // At 40 chars, only critical components should be visible
+        let state = create_full_state();
+        let text = render_to_string_with_width(&state, 40);
+
+        // Iteration (priority 1) always visible
+        assert!(
+            text.contains("[iter"),
+            "iteration should be visible at 40 chars, got: {}",
+            text
+        );
+
+        // Mode icon (priority 2) always visible
+        assert!(
+            text.contains('▶'),
+            "mode icon should be visible at 40 chars, got: {}",
+            text
+        );
+
+        // Idle should be hidden (priority 5)
+        assert!(
+            !text.contains("idle"),
+            "idle should be hidden at 40 chars, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn header_at_30_chars_extreme() {
+        // At 30 chars (extreme narrow), show only absolute minimum
+        let state = create_full_state();
+        let text = render_to_string_with_width(&state, 30);
+
+        // Should at least show iteration
+        assert!(
+            text.contains("[iter"),
+            "iteration should be visible even at 30 chars, got: {}",
+            text
+        );
+
+        // Mode icon should be visible (critical)
+        assert!(
+            text.contains('▶'),
+            "mode icon should be visible even at 30 chars, got: {}",
+            text
+        );
+    }
+
+    // =========================================================================
+    // TUI Iteration Pagination Tests (Task 05)
+    // =========================================================================
+
+    #[test]
+    fn header_shows_iteration_position_from_tui_state() {
+        // Given current_view = 2 (0-indexed, displays as 3) and total_iterations = 5
+        let mut state = TuiState::new();
+        // Create 5 iterations
+        for _ in 0..5 {
+            state.start_new_iteration();
+        }
+        state.current_view = 2; // Viewing iteration 3
+
+        let text = render_to_string(&state);
+        assert!(
+            text.contains("[iter 3/5]"),
+            "should show [iter 3/5] for current_view=2, total=5, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn header_shows_single_iteration() {
+        // Given 1 iteration
+        let mut state = TuiState::new();
+        state.start_new_iteration();
+
+        let text = render_to_string(&state);
+        assert!(
+            text.contains("[iter 1/1]"),
+            "should show [iter 1/1] for single iteration, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn header_shows_live_mode_when_following_latest() {
+        // Given following_latest = true
+        let mut state = TuiState::new();
+        state.start_new_iteration();
+        state.following_latest = true;
+
+        let text = render_to_string(&state);
+        assert!(
+            text.contains("[LIVE]"),
+            "should show [LIVE] when following_latest=true, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn header_shows_review_mode_when_not_following_latest() {
+        // Given following_latest = false
+        let mut state = TuiState::new();
+        state.start_new_iteration();
+        state.start_new_iteration();
+        state.current_view = 0;
+        state.following_latest = false;
+
+        let text = render_to_string(&state);
+        assert!(
+            text.contains("[REVIEW]"),
+            "should show [REVIEW] when following_latest=false, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn header_preserves_hat_display_with_new_format() {
+        // Given hat = "Builder" with emoji "🔨"
+        let mut state = TuiState::new();
+        state.start_new_iteration();
+        state.pending_hat = Some((HatId::new("builder"), "🔨Builder".to_string()));
+
+        let text = render_to_string(&state);
+        assert!(
+            text.contains("Builder"),
+            "should preserve hat display, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn header_preserves_elapsed_time_with_new_format() {
+        // Given 5 minutes elapsed
+        let mut state = TuiState::new();
+        state.start_new_iteration();
+        let event = Event::new("task.start", "");
+        state.update(&event);
+        state.loop_started = Some(
+            std::time::Instant::now()
+                .checked_sub(Duration::from_secs(300))
+                .unwrap(),
+        );
+
+        let text = render_to_string(&state);
+        assert!(
+            text.contains("05:00"),
+            "should preserve elapsed time display, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn header_handles_empty_iterations() {
+        // Given no iterations yet
+        let state = TuiState::new();
+
+        let text = render_to_string(&state);
+        // current_view starts at 0, so display is (0+1)=1, total is 0
+        // Shows [iter 1/0] which indicates "viewing position 1 of 0 total"
+        assert!(
+            text.contains("[iter 1/0]"),
+            "should show [iter 1/0] for empty state (position 1, 0 total), got: {}",
             text
         );
     }

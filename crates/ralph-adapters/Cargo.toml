@@ -21,6 +21,18 @@ anyhow.workspace = true
 tracing.workspace = true
 tempfile.workspace = true
 
+# Terminal markdown rendering
+termimad.workspace = true
+
+# TUI markdown rendering (converts markdown to ratatui Text)
+tui-markdown = "0.3"
+
+# ANSI escape code parsing (converts ANSI to ratatui Text)
+ansi-to-tui = "8"
+
+# TUI (for TuiStreamHandler)
+ratatui.workspace = true
+
 # PTY support
 portable-pty.workspace = true
 nix.workspace = true

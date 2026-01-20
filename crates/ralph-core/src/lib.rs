@@ -24,6 +24,8 @@ mod session_recorder;
 mod summary_writer;
 pub mod task_definition;
 pub mod testing;
+mod text;
+pub mod utils;
 pub mod workspace;
 
 pub use cli_capture::{CliCapture, CliCapturePair};
@@ -43,6 +45,7 @@ pub use summary_writer::SummaryWriter;
 pub use task_definition::{
     TaskDefinition, TaskDefinitionError, TaskSetup, TaskSuite, Verification,
 };
+pub use text::truncate_with_ellipsis;
 pub use workspace::{
     CleanupPolicy, TaskWorkspace, VerificationResult, WorkspaceError, WorkspaceInfo,
     WorkspaceManager,

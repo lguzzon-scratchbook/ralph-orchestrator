@@ -143,7 +143,7 @@ async def test_llm_judge_validates_content(llm_judge: LLMJudge):
     """Test that LLM judge can validate terminal content."""
     # Sample terminal output that should pass validation
     valid_content = """
-user@machine:~/project$ ralph run -i --idle-timeout 5 -p "Say hello"
+user@machine:~/project$ ralph run --tui --idle-timeout 5 -p "Say hello"
 [Starting Ralph orchestrator...]
 
 Hello! I'm here to help.

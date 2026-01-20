@@ -17,37 +17,65 @@ pub fn render(f: &mut Frame, area: Rect) {
 
     let help_text = vec![
         Line::from(Span::styled(
-            "Prefix Commands (Ctrl+a then key):",
+            "Navigation:",
             Style::default().fg(Color::Yellow),
         )),
-        Line::from(""),
         Line::from(vec![
-            Span::styled("  q", Style::default().fg(Color::Cyan)),
-            Span::raw("  Quit TUI"),
+            Span::styled("  h/←", Style::default().fg(Color::Cyan)),
+            Span::raw("    Previous iteration"),
         ]),
         Line::from(vec![
-            Span::styled("  ?", Style::default().fg(Color::Cyan)),
-            Span::raw("  Show this help"),
-        ]),
-        Line::from(vec![
-            Span::styled("  p", Style::default().fg(Color::Cyan)),
-            Span::raw("  Pause/resume loop"),
-        ]),
-        Line::from(vec![
-            Span::styled("  n", Style::default().fg(Color::Cyan)),
-            Span::raw("  Skip to next iteration"),
-        ]),
-        Line::from(vec![
-            Span::styled("  a", Style::default().fg(Color::Cyan)),
-            Span::raw("  Abort loop"),
-        ]),
-        Line::from(vec![
-            Span::styled("  [", Style::default().fg(Color::Cyan)),
-            Span::raw("  Enter scroll mode"),
+            Span::styled("  l/→", Style::default().fg(Color::Cyan)),
+            Span::raw("    Next iteration"),
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "Press any key to dismiss",
+            "Scrolling:",
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(vec![
+            Span::styled("  j/↓", Style::default().fg(Color::Cyan)),
+            Span::raw("    Scroll down"),
+        ]),
+        Line::from(vec![
+            Span::styled("  k/↑", Style::default().fg(Color::Cyan)),
+            Span::raw("    Scroll up"),
+        ]),
+        Line::from(vec![
+            Span::styled("  g", Style::default().fg(Color::Cyan)),
+            Span::raw("      Scroll to top"),
+        ]),
+        Line::from(vec![
+            Span::styled("  G", Style::default().fg(Color::Cyan)),
+            Span::raw("      Scroll to bottom"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("Search:", Style::default().fg(Color::Yellow))),
+        Line::from(vec![
+            Span::styled("  /", Style::default().fg(Color::Cyan)),
+            Span::raw("      Start search"),
+        ]),
+        Line::from(vec![
+            Span::styled("  n/N", Style::default().fg(Color::Cyan)),
+            Span::raw("    Next/prev match"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("Other:", Style::default().fg(Color::Yellow))),
+        Line::from(vec![
+            Span::styled("  q", Style::default().fg(Color::Cyan)),
+            Span::raw("      Quit"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ?", Style::default().fg(Color::Cyan)),
+            Span::raw("      Show this help"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc", Style::default().fg(Color::Cyan)),
+            Span::raw("    Dismiss/cancel"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press Esc to dismiss",
             Style::default().fg(Color::DarkGray),
         )),
     ];

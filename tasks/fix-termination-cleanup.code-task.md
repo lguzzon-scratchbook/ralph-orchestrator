@@ -206,7 +206,7 @@ fn terminate_child(&self, child: &mut Box<dyn portable_pty::Child + Send>, grace
 
 ```bash
 cargo build --release
-./target/release/ralph run -i -c ralph.claude.yml -p "Hello"
+./target/release/ralph run --tui -c ralph.claude.yml -p "Hello"
 # Wait for Claude to start responding
 # Press Ctrl+C twice quickly
 ```
@@ -240,7 +240,7 @@ echo "Terminal is working"
 
 ```bash
 for i in {1..10}; do
-    timeout 5 ./target/release/ralph run -i -c ralph.claude.yml -p "Hi" &
+    timeout 5 ./target/release/ralph run --tui -c ralph.claude.yml -p "Hi" &
     sleep 1
     kill -INT $!
     sleep 0.5

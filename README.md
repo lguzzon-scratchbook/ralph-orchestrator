@@ -199,8 +199,8 @@ ralph run
 # With inline prompt
 ralph run -p "Implement the login endpoint with JWT authentication"
 
-# Interactive TUI mode (experimental)
-ralph run -i
+# TUI mode (experimental)
+ralph run --tui
 
 # Resume interrupted session
 ralph resume
@@ -291,7 +291,6 @@ event_loop:
 cli:
   backend: "claude"                     # claude, kiro, gemini, codex, amp, copilot, opencode, custom
   prompt_mode: "arg"                    # arg (CLI argument) or stdin
-  experimental_tui: false               # Enable TUI mode support
 
 # Core behaviors (always injected into prompts)
 core:
@@ -444,7 +443,7 @@ tests: pass, lint: pass, typecheck: pass
 | `--max-iterations <N>` | Override max iterations |
 | `--completion-promise <TEXT>` | Override completion trigger |
 | `--dry-run` | Show what would execute |
-| `-i, --interactive` | Enable TUI mode (experimental) |
+| `--tui` | Enable TUI mode (experimental) |
 | `-a, --autonomous` | Force headless mode |
 | `--idle-timeout <SECS>` | TUI idle timeout (default: 30) |
 | `--record-session <FILE>` | Record session to JSONL |

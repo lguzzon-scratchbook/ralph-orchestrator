@@ -1,29 +1,22 @@
 //! Integration tests for iteration boundary handling.
 
 use ralph_proto::Event;
-use ralph_tui::TerminalWidget;
 use std::sync::{Arc, Mutex};
 
 /// Helper to create a TuiState and simulate events.
-fn simulate_events(
-    events: Vec<Event>,
-) -> (
-    Arc<Mutex<ralph_tui::state::TuiState>>,
-    Arc<Mutex<TerminalWidget>>,
-) {
+fn simulate_events(events: Vec<Event>) -> Arc<Mutex<ralph_tui::state::TuiState>> {
     let state = Arc::new(Mutex::new(ralph_tui::state::TuiState::new()));
-    let widget = Arc::new(Mutex::new(TerminalWidget::new()));
 
     for event in events {
         state.lock().unwrap().update(&event);
     }
 
-    (state, widget)
+    state
 }
 
 #[test]
 fn iteration_changes_on_build_done() {
-    let (state, _widget) = simulate_events(vec![
+    let state = simulate_events(vec![
         Event::new("task.start", "Start"),
         Event::new("build.task", "Task 1"),
     ]);
@@ -42,7 +35,7 @@ fn iteration_changes_on_build_done() {
 
 #[test]
 fn iteration_changed_detects_transition() {
-    let (state, _widget) = simulate_events(vec![Event::new("task.start", "Start")]);
+    let state = simulate_events(vec![Event::new("task.start", "Start")]);
 
     // Initially no change
     assert!(!state.lock().unwrap().iteration_changed());
@@ -56,29 +49,8 @@ fn iteration_changed_detects_transition() {
 }
 
 #[test]
-fn terminal_widget_clear_resets_parser() {
-    let mut widget = TerminalWidget::new();
-
-    // Add some content
-    widget.process(b"Hello, world!\n");
-    widget.process(b"Line 2\n");
-    widget.process(b"Line 3\n");
-
-    // Clear should reset
-    widget.clear();
-
-    // After clear, total lines should be minimal (just screen size)
-    let total = widget.total_lines();
-    assert!(
-        total <= 24,
-        "Expected minimal lines after clear, got {}",
-        total
-    );
-}
-
-#[test]
 fn header_shows_updated_iteration() {
-    let (state, _widget) = simulate_events(vec![Event::new("task.start", "Start")]);
+    let state = simulate_events(vec![Event::new("task.start", "Start")]);
 
     let initial = state.lock().unwrap().iteration;
     assert_eq!(initial, 0);
@@ -100,7 +72,7 @@ fn header_shows_updated_iteration() {
 
 #[test]
 fn multiple_iterations_tracked_correctly() {
-    let (state, _widget) = simulate_events(vec![Event::new("task.start", "Start")]);
+    let state = simulate_events(vec![Event::new("task.start", "Start")]);
 
     for i in 0..5 {
         let before = state.lock().unwrap().iteration;

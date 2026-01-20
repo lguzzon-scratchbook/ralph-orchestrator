@@ -117,7 +117,7 @@ Use the `/tui-validate` skill to validate Terminal UI rendering. This applies **
 ```bash
 # 1. Start TUI in tmux
 tmux new-session -d -s ralph-test -x 100 -y 30
-tmux send-keys -t ralph-test "cargo run --bin ralph -- run -i -c ralph.yml -p 'your prompt'" Enter
+tmux send-keys -t ralph-test "cargo run --bin ralph -- run --tui -c ralph.yml -p 'your prompt'" Enter
 
 # 2. Wait for TUI to render
 sleep 3
@@ -183,3 +183,4 @@ See `.claude/skills/pr-demo/SKILL.md` for full documentation.
 - Run `cargo test` before declaring any task done (includes replay smoke tests)
 - Backwards compatibility doesn't matter — it adds clutter for no reason
 - Prefer replay-based smoke tests over live API calls for CI
+- Run python tests, using a .venv

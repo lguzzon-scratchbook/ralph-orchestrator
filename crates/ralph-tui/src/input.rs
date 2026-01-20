@@ -1,405 +1,209 @@
-//! Input routing for TUI prefix commands.
+//! Simple key-to-action input handling for observation-only TUI.
+//!
+//! All keys map directly to actions - no modal input or prefix keys needed
+//! since the TUI is read-only and doesn't forward input to agents.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 
-/// Input routing mode.
+// =============================================================================
+// NEW API: Simple key-to-action mapping (Task 10)
+// =============================================================================
+
+/// Actions that can be triggered by key presses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputMode {
-    Normal,
-    AwaitingCommand,
-    Scroll,
-    Search,
-}
-
-/// Prefix commands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Command {
+pub enum Action {
+    /// Exit the TUI
     Quit,
-    Help,
-    Pause,
-    Skip,
-    Abort,
-    EnterScroll,
-    Unknown,
+    /// Navigate to next iteration
+    NextIteration,
+    /// Navigate to previous iteration
+    PrevIteration,
+    /// Scroll down one line
+    ScrollDown,
+    /// Scroll up one line
+    ScrollUp,
+    /// Jump to top of content
+    ScrollTop,
+    /// Jump to bottom of content
+    ScrollBottom,
+    /// Enter search mode
+    StartSearch,
+    /// Jump to next search match
+    SearchNext,
+    /// Jump to previous search match
+    SearchPrev,
+    /// Show help overlay
+    ShowHelp,
+    /// Dismiss help overlay or cancel search
+    DismissHelp,
+    /// Key not mapped to any action
+    None,
 }
 
-/// Result of routing a key event.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RouteResult {
-    Forward(KeyEvent),
-    Command(Command),
-    ScrollKey(KeyEvent),
-    ExitScroll,
-    EnterSearch { forward: bool },
-    SearchInput(KeyEvent),
-    ExecuteSearch,
-    CancelSearch,
-    Consumed,
-}
-
-/// Routes input between normal mode and command mode.
-pub struct InputRouter {
-    mode: InputMode,
-    prefix_key: KeyCode,
-    prefix_modifiers: KeyModifiers,
-}
-
-impl InputRouter {
-    pub fn new() -> Self {
-        Self {
-            mode: InputMode::Normal,
-            prefix_key: KeyCode::Char('a'),
-            prefix_modifiers: KeyModifiers::CONTROL,
-        }
-    }
-
-    /// Creates a new `InputRouter` with a custom prefix key.
-    pub fn with_prefix(prefix_key: KeyCode, prefix_modifiers: KeyModifiers) -> Self {
-        Self {
-            mode: InputMode::Normal,
-            prefix_key,
-            prefix_modifiers,
-        }
-    }
-
-    /// Routes a key event based on current mode.
-    pub fn route_key(&mut self, key: KeyEvent) -> RouteResult {
-        match self.mode {
-            InputMode::Normal => {
-                if self.is_prefix(key) {
-                    self.mode = InputMode::AwaitingCommand;
-                    RouteResult::Consumed
-                } else {
-                    RouteResult::Forward(key)
-                }
-            }
-            InputMode::AwaitingCommand => {
-                self.mode = InputMode::Normal;
-                if let Some(c) = extract_char(key) {
-                    RouteResult::Command(match c {
-                        'q' => Command::Quit,
-                        '?' => Command::Help,
-                        'p' => Command::Pause,
-                        'n' => Command::Skip,
-                        'a' => Command::Abort,
-                        '[' => Command::EnterScroll,
-                        _ => Command::Unknown,
-                    })
-                } else {
-                    RouteResult::Consumed
-                }
-            }
-            InputMode::Scroll => {
-                // Handle search initiation
-                if matches!(key.code, KeyCode::Char('/')) {
-                    self.mode = InputMode::Search;
-                    return RouteResult::EnterSearch { forward: true };
-                }
-                if matches!(key.code, KeyCode::Char('?')) {
-                    self.mode = InputMode::Search;
-                    return RouteResult::EnterSearch { forward: false };
-                }
-                // Handle search navigation
-                if matches!(key.code, KeyCode::Char('n')) {
-                    return RouteResult::ScrollKey(key);
-                }
-                if matches!(key.code, KeyCode::Char('N')) {
-                    return RouteResult::ScrollKey(key);
-                }
-                // Exit scroll mode on q, Escape, or Enter
-                if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter) {
-                    self.mode = InputMode::Normal;
-                    RouteResult::ExitScroll
-                } else {
-                    RouteResult::ScrollKey(key)
-                }
-            }
-            InputMode::Search => match key.code {
-                KeyCode::Enter => {
-                    self.mode = InputMode::Scroll;
-                    RouteResult::ExecuteSearch
-                }
-                KeyCode::Esc => {
-                    self.mode = InputMode::Scroll;
-                    RouteResult::CancelSearch
-                }
-                _ => RouteResult::SearchInput(key),
-            },
-        }
-    }
-
-    /// Enters scroll mode.
-    pub fn enter_scroll_mode(&mut self) {
-        self.mode = InputMode::Scroll;
-    }
-
-    /// Exits scroll mode back to normal.
-    pub fn exit_scroll_mode(&mut self) {
-        self.mode = InputMode::Normal;
-    }
-
-    fn is_prefix(&self, key: KeyEvent) -> bool {
-        key.code == self.prefix_key && key.modifiers.contains(self.prefix_modifiers)
-    }
-}
-
-impl Default for InputRouter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-fn extract_char(key: KeyEvent) -> Option<char> {
+/// Maps a key event to its corresponding action.
+///
+/// Supports both arrow keys and vim-style navigation:
+/// - `q`: Quit
+/// - `←`/`h`: Previous iteration
+/// - `→`/`l`: Next iteration
+/// - `↓`/`j`: Scroll down
+/// - `↑`/`k`: Scroll up
+/// - `g`: Scroll to top
+/// - `G`: Scroll to bottom
+/// - `/`: Start search
+/// - `n`: Next search match
+/// - `N`: Previous search match
+/// - `?`: Show help
+/// - `Esc`: Dismiss help/cancel search
+pub fn map_key(key: KeyEvent) -> Action {
     match key.code {
-        KeyCode::Char(c) => Some(c),
-        _ => None,
+        // Quit
+        KeyCode::Char('q') => Action::Quit,
+
+        // Iteration navigation
+        KeyCode::Right | KeyCode::Char('l') => Action::NextIteration,
+        KeyCode::Left | KeyCode::Char('h') => Action::PrevIteration,
+
+        // Scroll
+        KeyCode::Down | KeyCode::Char('j') => Action::ScrollDown,
+        KeyCode::Up | KeyCode::Char('k') => Action::ScrollUp,
+        KeyCode::Char('g') => Action::ScrollTop,
+        KeyCode::Char('G') => Action::ScrollBottom,
+
+        // Search
+        KeyCode::Char('/') => Action::StartSearch,
+        KeyCode::Char('n') => Action::SearchNext,
+        KeyCode::Char('N') => Action::SearchPrev,
+
+        // Help
+        KeyCode::Char('?') => Action::ShowHelp,
+        KeyCode::Esc => Action::DismissHelp,
+
+        // Unknown
+        _ => Action::None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyModifiers;
 
+    // AC1: q Quits
     #[test]
-    fn normal_mode_forwards_regular_keys() {
-        let mut router = InputRouter::new();
-        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
-        assert_eq!(router.route_key(key), RouteResult::Forward(key));
-    }
-
-    #[test]
-    fn ctrl_a_switches_to_awaiting_command() {
-        let mut router = InputRouter::new();
-        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        assert_eq!(router.route_key(key), RouteResult::Consumed);
-    }
-
-    #[test]
-    fn next_key_after_ctrl_a_returns_command() {
-        let mut router = InputRouter::new();
-        let prefix = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        router.route_key(prefix);
-
-        let cmd = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
-        assert_eq!(router.route_key(cmd), RouteResult::Command(Command::Quit));
-    }
-
-    #[test]
-    fn state_resets_to_normal_after_command() {
-        let mut router = InputRouter::new();
-        let prefix = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        router.route_key(prefix);
-
-        let cmd = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
-        router.route_key(cmd);
-
-        let next = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
-        assert_eq!(router.route_key(next), RouteResult::Forward(next));
-    }
-
-    #[test]
-    fn quit_command_returns_q() {
-        let mut router = InputRouter::new();
-        let prefix = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        router.route_key(prefix);
-
-        let cmd = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
-        assert_eq!(router.route_key(cmd), RouteResult::Command(Command::Quit));
-    }
-
-    #[test]
-    fn help_command_returns_question_mark() {
-        let mut router = InputRouter::new();
-        let prefix = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        router.route_key(prefix);
-
-        let cmd = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
-        assert_eq!(router.route_key(cmd), RouteResult::Command(Command::Help));
-    }
-
-    #[test]
-    fn unknown_command_returns_unknown() {
-        let mut router = InputRouter::new();
-        let prefix = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        router.route_key(prefix);
-
-        let cmd = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
-        assert_eq!(
-            router.route_key(cmd),
-            RouteResult::Command(Command::Unknown)
-        );
-    }
-
-    #[test]
-    fn pause_command_returns_p() {
-        let mut router = InputRouter::new();
-        let prefix = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        router.route_key(prefix);
-
-        let cmd = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
-        assert_eq!(router.route_key(cmd), RouteResult::Command(Command::Pause));
-    }
-
-    #[test]
-    fn skip_command_returns_n() {
-        let mut router = InputRouter::new();
-        let prefix = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        router.route_key(prefix);
-
-        let cmd = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
-        assert_eq!(router.route_key(cmd), RouteResult::Command(Command::Skip));
-    }
-
-    #[test]
-    fn abort_command_returns_a() {
-        let mut router = InputRouter::new();
-        let prefix = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        router.route_key(prefix);
-
-        let cmd = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
-        assert_eq!(router.route_key(cmd), RouteResult::Command(Command::Abort));
-    }
-
-    #[test]
-    fn enter_scroll_command_returns_bracket() {
-        let mut router = InputRouter::new();
-        let prefix = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        router.route_key(prefix);
-
-        let cmd = KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE);
-        assert_eq!(
-            router.route_key(cmd),
-            RouteResult::Command(Command::EnterScroll)
-        );
-    }
-
-    #[test]
-    fn scroll_mode_routes_navigation_keys() {
-        let mut router = InputRouter::new();
-        router.enter_scroll_mode();
-
-        let key = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
-        assert_eq!(router.route_key(key), RouteResult::ScrollKey(key));
-    }
-
-    #[test]
-    fn scroll_mode_exits_on_q() {
-        let mut router = InputRouter::new();
-        router.enter_scroll_mode();
-
+    fn q_returns_quit() {
         let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
-        assert_eq!(router.route_key(key), RouteResult::ExitScroll);
+        assert_eq!(map_key(key), Action::Quit);
     }
 
+    // AC2: Right Arrow Next Iteration
     #[test]
-    fn scroll_mode_exits_on_escape() {
-        let mut router = InputRouter::new();
-        router.enter_scroll_mode();
-
-        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-        assert_eq!(router.route_key(key), RouteResult::ExitScroll);
+    fn right_arrow_returns_next_iteration() {
+        let key = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(map_key(key), Action::NextIteration);
     }
 
+    // AC3: Left Arrow Prev Iteration
     #[test]
-    fn scroll_mode_exits_on_enter() {
-        let mut router = InputRouter::new();
-        router.enter_scroll_mode();
-
-        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(router.route_key(key), RouteResult::ExitScroll);
+    fn left_arrow_returns_prev_iteration() {
+        let key = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(map_key(key), Action::PrevIteration);
     }
 
+    // AC4: j Scroll Down
     #[test]
-    fn scroll_mode_enters_forward_search() {
-        let mut router = InputRouter::new();
-        router.enter_scroll_mode();
+    fn j_returns_scroll_down() {
+        let key = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(map_key(key), Action::ScrollDown);
+    }
 
+    // AC5: k Scroll Up
+    #[test]
+    fn k_returns_scroll_up() {
+        let key = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
+        assert_eq!(map_key(key), Action::ScrollUp);
+    }
+
+    // AC6: g Scroll Top
+    #[test]
+    fn g_returns_scroll_top() {
+        let key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        assert_eq!(map_key(key), Action::ScrollTop);
+    }
+
+    // AC7: G Scroll Bottom
+    #[test]
+    fn shift_g_returns_scroll_bottom() {
+        let key = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
+        assert_eq!(map_key(key), Action::ScrollBottom);
+    }
+
+    // AC8: / Start Search
+    #[test]
+    fn slash_returns_start_search() {
         let key = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
-        assert_eq!(
-            router.route_key(key),
-            RouteResult::EnterSearch { forward: true }
-        );
+        assert_eq!(map_key(key), Action::StartSearch);
     }
 
+    // AC9: n Search Next
     #[test]
-    fn scroll_mode_enters_backward_search() {
-        let mut router = InputRouter::new();
-        router.enter_scroll_mode();
-
-        let key = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
-        assert_eq!(
-            router.route_key(key),
-            RouteResult::EnterSearch { forward: false }
-        );
-    }
-
-    #[test]
-    fn search_mode_captures_input() {
-        let mut router = InputRouter::new();
-        router.enter_scroll_mode();
-        router.route_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-
-        let key = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
-        assert_eq!(router.route_key(key), RouteResult::SearchInput(key));
-    }
-
-    #[test]
-    fn search_mode_executes_on_enter() {
-        let mut router = InputRouter::new();
-        router.enter_scroll_mode();
-        router.route_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-
-        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(router.route_key(key), RouteResult::ExecuteSearch);
-    }
-
-    #[test]
-    fn search_mode_cancels_on_escape() {
-        let mut router = InputRouter::new();
-        router.enter_scroll_mode();
-        router.route_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-
-        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-        assert_eq!(router.route_key(key), RouteResult::CancelSearch);
-    }
-
-    #[test]
-    fn scroll_mode_handles_n_for_next_match() {
-        let mut router = InputRouter::new();
-        router.enter_scroll_mode();
-
+    fn n_returns_search_next() {
         let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
-        assert_eq!(router.route_key(key), RouteResult::ScrollKey(key));
+        assert_eq!(map_key(key), Action::SearchNext);
     }
 
+    // AC10: N Search Prev
     #[test]
-    fn scroll_mode_handles_shift_n_for_prev_match() {
-        let mut router = InputRouter::new();
-        router.enter_scroll_mode();
-
+    fn shift_n_returns_search_prev() {
         let key = KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT);
-        assert_eq!(router.route_key(key), RouteResult::ScrollKey(key));
+        assert_eq!(map_key(key), Action::SearchPrev);
+    }
+
+    // AC11: ? Show Help
+    #[test]
+    fn question_mark_returns_show_help() {
+        let key = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
+        assert_eq!(map_key(key), Action::ShowHelp);
+    }
+
+    // AC12: Esc Dismiss Help
+    #[test]
+    fn esc_returns_dismiss_help() {
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(map_key(key), Action::DismissHelp);
+    }
+
+    // AC13: Vim l Next Iteration
+    #[test]
+    fn l_returns_next_iteration() {
+        let key = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE);
+        assert_eq!(map_key(key), Action::NextIteration);
+    }
+
+    // AC14: Vim h Prev Iteration
+    #[test]
+    fn h_returns_prev_iteration() {
+        let key = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+        assert_eq!(map_key(key), Action::PrevIteration);
+    }
+
+    // AC15: Unknown Key Returns None
+    #[test]
+    fn unknown_key_returns_none() {
+        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(map_key(key), Action::None);
+    }
+
+    // Additional tests for arrow key alternatives
+    #[test]
+    fn down_arrow_returns_scroll_down() {
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(map_key(key), Action::ScrollDown);
     }
 
     #[test]
-    fn custom_prefix_ctrl_b_works() {
-        let mut router = InputRouter::with_prefix(KeyCode::Char('b'), KeyModifiers::CONTROL);
-
-        // Ctrl+B should trigger command mode
-        let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
-        assert_eq!(router.route_key(prefix), RouteResult::Consumed);
-
-        // Next key should be interpreted as command
-        let cmd = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
-        assert_eq!(router.route_key(cmd), RouteResult::Command(Command::Quit));
-    }
-
-    #[test]
-    fn custom_prefix_ctrl_b_ignores_ctrl_a() {
-        let mut router = InputRouter::with_prefix(KeyCode::Char('b'), KeyModifiers::CONTROL);
-
-        // Ctrl+A should be forwarded, not consumed
-        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        assert_eq!(router.route_key(key), RouteResult::Forward(key));
+    fn up_arrow_returns_scroll_up() {
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(map_key(key), Action::ScrollUp);
     }
 }

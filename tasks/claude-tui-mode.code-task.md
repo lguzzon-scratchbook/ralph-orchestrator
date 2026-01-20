@@ -30,7 +30,7 @@ ralph run -p "prompt"
 
 **Desired Flow (TUI/Interactive):**
 ```
-ralph run -i -p "prompt"
+ralph run --tui -p "prompt"
   → CliBackend::claude_tui() builds: claude --dangerously-skip-permissions "prompt" (no -p, no stream-json)
   → PtyExecutor::run_interactive() handles raw PTY I/O
   → TUI renders Claude's native TUI via tui_term::PseudoTerminal
@@ -198,7 +198,7 @@ PtyControl::Resize { rows, cols } => {
 
 ## Acceptance Criteria
 
-- [ ] `ralph run -i -p "hello"` with Claude backend shows Claude's native TUI correctly
+- [ ] `ralph run --tui -p "hello"` with Claude backend shows Claude's native TUI correctly
 - [ ] `ralph run -p "hello"` (autonomous mode) still uses `-p` with `stream-json` output
 - [ ] Terminal resizes when window size changes
 - [ ] Claude's spinners and colored output render correctly in TUI mode
@@ -210,7 +210,7 @@ PtyControl::Resize { rows, cols } => {
 1. **Manual TUI test**:
    ```bash
    cargo build --release
-   ./target/release/ralph run -i -c ralph.claude.yml -p "Say hello"
+   ./target/release/ralph run --tui -c ralph.claude.yml -p "Say hello"
    ```
    - Verify Claude's TUI renders correctly (no garbled output)
    - Resize the terminal window, verify content adjusts

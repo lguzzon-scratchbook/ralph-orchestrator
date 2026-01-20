@@ -38,8 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING**: Planner hat removed from all presets
 - **BREAKING**: Events must be written to `.agent/events.jsonl` (XML format deprecated)
 - **BREAKING**: HatRegistry no longer creates default planner/builder hats
-- CLI flag `-i/--interactive` now launches TUI mode (was non-interactive mode)
-- CLI flag `--tui` deprecated (use `-i` instead)
+- CLI flag `--tui` launches TUI mode for visual observation
+- TUI mode provides scroll and search navigation while removing execution controls (pause, skip, abort)
 - HatConfig now includes `backend` and `default_publishes` fields
 - InstructionBuilder adds `build_hatless_ralph()` for new prompt format
 - EventLoop uses EventReader instead of EventParser
