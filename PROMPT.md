@@ -1,8 +1,4 @@
-prepare for a 2.2.0 releaae.
 
-validate functionality, documentation is up to date, etc.
+recreate the docs website from scratch and host it on gh like before. you the most modern stack. use websearch to drive your design. it must fit the contraints of a gh hosted website.
 
-IMPORTANT:
-you must validate with real manual tests.
-once everything is complete commit and pr. do not include ephemeral files.
-you must perform a comprehensive documentation review and update.
+the docs must have zero hallucinations while being comprehensive. you must study the ralph wiggum methodlogy in detail to provide ckntext behind features and design decisions.

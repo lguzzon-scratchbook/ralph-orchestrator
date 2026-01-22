@@ -8,6 +8,10 @@
 
 ## Decisions
 
+### mem-1769058662-9978
+> Created comprehensive MkDocs documentation site for v2 Rust implementation. Uses Material theme with deep purple/amber color scheme, Inter font. Includes: Getting Started, Concepts (Tenets, Hats, Events, Memories, Backpressure), User Guide (Config, Presets, CLI, Backends), Advanced (Architecture, Testing, Diagnostics), API Reference for all 5 main crates, Examples, Contributing guide, Reference section.
+<!-- tags: docs, mkdocs, architecture | created: 2026-01-22 -->
+
 ### mem-1769053131-adaf
 > Ralph should never close a task unless it's actually been completed. Tasks must have verified completion evidence before closure.
 <!-- tags: tasks, workflow, policy | created: 2026-01-22 -->

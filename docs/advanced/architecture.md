@@ -1,222 +1,302 @@
-# System Architecture
+# Architecture
+
+Ralph's system architecture and how the pieces fit together.
 
 ## Overview
 
-Ralph Orchestrator implements a simple yet effective architecture based on the Ralph Wiggum technique - a continuous loop pattern that runs AI agents until task completion.
+Ralph is a Cargo workspace with seven crates, each with a specific responsibility:
 
-## Core Components
-
-### 1. Orchestration Engine
-
-The heart of Ralph is the orchestration loop in `ralph_orchestrator.py`:
-
-```python
-while not task_complete:
-    execute_agent()
-    check_completion()
-    handle_errors()
-    checkpoint_if_needed()
+```
+┌─────────────────────────────────────────────────────────┐
+│                      ralph-cli                          │
+│                  (Binary Entry Point)                   │
+├─────────────┬─────────────┬─────────────┬──────────────┤
+│ ralph-core  │ralph-adapters│  ralph-tui  │ ralph-e2e   │
+│  (Engine)   │ (Backends)   │    (UI)     │  (Testing)  │
+├─────────────┴─────────────┴─────────────┴──────────────┤
+│                     ralph-proto                         │
+│                  (Protocol Types)                       │
+└─────────────────────────────────────────────────────────┘
 ```
 
-### 2. Agent Abstraction Layer
+## Crate Responsibilities
 
-Ralph supports multiple AI agents through a unified interface:
+### ralph-proto
 
-- **Claude** (Anthropic Claude Code CLI)
-- **Q Chat** (Q CLI tool) 
-- **Gemini** (Google Gemini CLI)
+Protocol types shared across all crates.
 
-Each agent is executed through subprocess calls with consistent error handling and output capture.
+**Key types:**
 
-### 3. State Management
+| Type | Purpose |
+|------|---------|
+| `Event` | Message with topic, payload, source/target hat |
+| `Hat` | Persona definition (triggers, publishes, instructions) |
+| `HatId` | Unique hat identifier |
+| `Topic` | Event routing with glob patterns |
+| `EventBus` | Hat registry and event routing |
+
+**Location:** `crates/ralph-proto/src/`
+
+### ralph-core
+
+The orchestration engine.
+
+**Key components:**
+
+| Module | Purpose |
+|--------|---------|
+| `EventLoop` | Main orchestration loop |
+| `config` | YAML configuration loading |
+| `event_parser` | Parse agent output for events |
+| `memory_store` | Persistent memory management |
+| `task_store` | Task storage and querying |
+| `instructions` | Hat instruction assembly |
+
+**Location:** `crates/ralph-core/src/`
+
+### ralph-adapters
+
+CLI backend integrations.
+
+**Key components:**
+
+| Module | Purpose |
+|--------|---------|
+| `CliBackend` | Backend definition |
+| `pty_executor` | PTY-based execution |
+| `stream_handler` | Output handlers |
+| `auto_detect` | Backend availability detection |
+
+**Supported backends:**
+- Claude Code
+- Kiro
+- Gemini CLI
+- Codex
+- Amp
+- Copilot CLI
+- OpenCode
+
+**Location:** `crates/ralph-adapters/src/`
+
+### ralph-tui
+
+Terminal UI using ratatui.
+
+**Features:**
+- Real-time iteration display
+- Elapsed time tracking
+- Hat emoji and name display
+- Activity indicator
+- Event topic display
+
+**Location:** `crates/ralph-tui/src/`
+
+### ralph-cli
+
+Binary entry point and CLI parsing.
+
+**Commands:**
+- `ralph run` — Execute orchestration
+- `ralph init` — Initialize config
+- `ralph plan` — PDD planning
+- `ralph task` — Task generation
+- `ralph events` — View history
+- `ralph tools` — Memory/task management
+
+**Location:** `crates/ralph-cli/src/`
+
+### ralph-e2e
+
+End-to-end testing framework.
+
+**Test tiers:**
+
+| Tier | Focus |
+|------|-------|
+| 1 | Connectivity |
+| 2 | Orchestration Loop |
+| 3 | Events |
+| 4 | Capabilities |
+| 5 | Hat Collections |
+| 6 | Memory System |
+| 7 | Error Handling |
+
+**Location:** `crates/ralph-e2e/src/`
+
+### ralph-bench
+
+Benchmarking harness (development only).
+
+**Location:** `crates/ralph-bench/src/`
+
+## Data Flow
+
+### Traditional Mode
+
+```mermaid
+flowchart TD
+    A[PROMPT.md] --> B[ralph-cli]
+    B --> C[ralph-core EventLoop]
+    C --> D[ralph-adapters Backend]
+    D --> E[AI CLI]
+    E --> F[Output]
+    F --> G{LOOP_COMPLETE?}
+    G -->|No| C
+    G -->|Yes| H[Done]
+```
+
+### Hat-Based Mode
+
+```mermaid
+flowchart TD
+    A[starting_event] --> B[EventBus]
+    B --> C{Match Hat?}
+    C -->|Yes| D[Inject Instructions]
+    D --> E[Execute Backend]
+    E --> F[Parse Output]
+    F --> G{Event Emitted?}
+    G -->|Yes| H[Route Event]
+    H --> B
+    G -->|No| I{LOOP_COMPLETE?}
+    I -->|Yes| J[Done]
+    I -->|No| B
+```
+
+## State Management
+
+### Files on Disk
+
+All persistent state lives in `.agent/`:
 
 ```
 .agent/
-├── metrics/        # Performance and state data
-├── checkpoints/    # Git checkpoint markers
-├── prompts/        # Archived prompt history
-└── plans/          # Agent planning documents
+├── memories.md         # Persistent learning
+├── tasks.jsonl         # Runtime work tracking
+├── event_history.jsonl # Event audit log
+└── scratchpad.md       # Legacy state (deprecated)
 ```
 
-### 4. Git Integration
+### Event Bus
 
-Ralph uses Git for:
-- **Checkpointing**: Regular commits for recovery
-- **History**: Track code evolution
-- **Rollback**: Reset to last known good state
+In-memory during execution:
 
-## System Flow
-
-```mermaid
-graph TD
-    A[Start] --> B[Load Configuration]
-    B --> C[Detect Available Agents]
-    C --> D[Initialize Workspace]
-    D --> E[Read PROMPT.md]
-    E --> F{Task Complete?}
-    F -->|No| G[Execute Agent]
-    G --> H[Process Output]
-    H --> I{Error?}
-    I -->|Yes| J[Retry Logic]
-    I -->|No| K[Update State]
-    J --> L{Max Retries?}
-    L -->|No| G
-    L -->|Yes| M[Stop]
-    K --> N{Checkpoint Interval?}
-    N -->|Yes| O[Create Git Checkpoint]
-    N -->|No| E
-    O --> E
-    F -->|Yes| P[Final Checkpoint]
-    P --> Q[End]
-```
-
-## Design Principles
-
-### 1. Simplicity Over Complexity
-- Core orchestrator is ~400 lines of Python
-- No external dependencies beyond AI CLI tools
-- Clear, readable code structure
-
-### 2. Fail-Safe Operations
-- Automatic retry with exponential backoff
-- State persistence across failures
-- Git checkpoints for recovery
-
-### 3. Agent Agnostic
-- Unified interface for all AI agents
-- Auto-detection of available tools
-- Graceful fallback when agents unavailable
-
-### 4. Observable Behavior
-- Comprehensive logging
-- Metrics collection
-- State inspection tools
-
-## Directory Structure
-
-```
-ralph-orchestrator/
-├── ralph_orchestrator.py     # Core orchestration engine
-├── ralph                     # Bash wrapper script
-├── PROMPT.md                # User task definition
-├── .agent/                  # Ralph workspace
-│   ├── metrics/            # JSON state files
-│   │   └── state_*.json
-│   ├── checkpoints/        # Git checkpoint markers
-│   │   └── checkpoint_*.txt
-│   ├── prompts/            # Archived prompts
-│   │   └── prompt_*.md
-│   └── plans/              # Planning documents
-│       └── *.md
-└── test_comprehensive.py    # Test suite
-```
-
-## Key Classes and Functions
-
-### RalphOrchestrator Class
-
-```python
-class RalphOrchestrator:
-    def __init__(self, config: Dict):
-        """Initialize orchestrator with configuration"""
-        
-    def run(self) -> Dict:
-        """Main orchestration loop"""
-        
-    def execute_agent(self, agent: str, prompt: str) -> Tuple:
-        """Execute AI agent with prompt"""
-        
-    def check_task_complete(self, prompt_file: str) -> bool:
-        """Check if task is marked complete"""
-        
-    def create_checkpoint(self, iteration: int):
-        """Create Git checkpoint"""
-        
-    def save_state(self):
-        """Persist current state to disk"""
-```
-
-### Agent Execution
-
-```python
-def execute_agent(agent: str, prompt: str) -> Tuple[bool, str]:
-    """Execute AI agent and capture output"""
-    cmd = [agent, prompt]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=300
-    )
-    return result.returncode == 0, result.stdout
-```
-
-## Error Handling
-
-### Retry Strategy
-1. Initial attempt
-2. Exponential backoff (2, 4, 8, 16 seconds)
-3. Maximum 5 consecutive failures
-4. State preserved between attempts
-
-### Recovery Mechanisms
-- Git reset to last checkpoint
-- Manual intervention points
-- State file analysis tools
-
-## Performance Considerations
-
-### Resource Usage
-- Minimal memory footprint (~50MB)
-- CPU bound by AI agent execution
-- Disk I/O for state persistence
-
-### Scalability
-- Single task execution (by design)
-- Parallel execution via multiple instances
-- No shared state between instances
-
-## Security
-
-### Process Isolation
-- AI agents run in subprocess
-- No direct code execution
-- Sandboxed file system access
-
-### Git Safety
-- No force pushes
-- Checkpoint-only commits
-- Preserves user commits
-
-## Monitoring
-
-### Metrics Collection
-```json
-{
-  "iteration_count": 15,
-  "runtime": 234.5,
-  "agent": "claude",
-  "errors": [],
-  "checkpoints": [5, 10, 15]
+```rust
+struct EventBus {
+    hats: HashMap<HatId, Hat>,
+    pending_events: VecDeque<Event>,
+    event_history: Vec<Event>,
 }
 ```
 
-### Health Checks
-- Agent availability detection
-- Prompt file validation
-- Git repository status
+### Configuration
 
-## Future Architecture Considerations
+Loaded from `ralph.yml`:
 
-### Potential Enhancements
-1. **Plugin System**: Dynamic agent loading
-2. **Web Interface**: Browser-based monitoring
-3. **Distributed Execution**: Task parallelization
-4. **Cloud Integration**: Remote execution support
+```rust
+struct Config {
+    cli: CliConfig,
+    event_loop: EventLoopConfig,
+    core: CoreConfig,
+    memories: MemoryConfig,
+    tasks: TaskConfig,
+    hats: HashMap<String, HatConfig>,
+}
+```
 
-### Maintaining Simplicity
-Any architectural changes should:
-- Preserve the core loop simplicity
-- Maintain the "unpossible" philosophy
-- Keep dependencies minimal
-- Ensure deterministic behavior
+## Process Model
+
+### Unix Process Groups
+
+Ralph manages processes carefully:
+
+- Creates process group leadership
+- Handles SIGINT, SIGTERM gracefully
+- Prevents orphan processes
+- Restores terminal state on exit
+
+### PTY Handling
+
+For real-time output capture:
+
+```rust
+// Async PTY execution with stream handling
+pty_executor.execute(command, stream_handler).await
+```
+
+## Async Architecture
+
+Ralph uses Tokio throughout:
+
+- Async trait support
+- Stream-based output capture
+- Concurrent PTY handling
+- Non-blocking TUI updates
+
+## Error Handling
+
+Custom error types with context:
+
+```rust
+// thiserror for type definitions
+#[derive(Error, Debug)]
+enum RalphError {
+    #[error("Configuration error: {0}")]
+    Config(String),
+    // ...
+}
+
+// anyhow for context
+fn load_config() -> Result<Config> {
+    read_file(path).context("Failed to load config")?
+}
+```
+
+## Extension Points
+
+### Custom Backends
+
+Implement `CliBackend` trait:
+
+```rust
+struct MyBackend;
+
+impl CliBackend for MyBackend {
+    fn command(&self) -> &str { "my-cli" }
+    fn prompt_mode(&self) -> PromptMode { PromptMode::Arg }
+}
+```
+
+### Custom Stream Handlers
+
+Implement `StreamHandler` trait:
+
+```rust
+struct MyHandler;
+
+impl StreamHandler for MyHandler {
+    fn on_output(&mut self, chunk: &str) { ... }
+    fn on_complete(&mut self) { ... }
+}
+```
+
+## Performance Considerations
+
+### Context Window
+
+Optimize for "smart zone" (40-60% of tokens):
+
+- Memory injection has configurable budget
+- Instructions are assembled efficiently
+- Large outputs are truncated
+
+### Token Efficiency
+
+- Events are routing signals, not data transport
+- Detailed output goes to memories
+- Event payloads are kept small
+
+## Next Steps
+
+- Explore [Event System Design](event-system.md) in depth
+- Learn about [Creating Custom Hats](custom-hats.md)
+- Understand [Testing & Validation](testing.md)

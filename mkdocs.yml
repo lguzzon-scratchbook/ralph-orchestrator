@@ -1,6 +1,8 @@
 # Ralph Orchestrator Documentation
+# MkDocs configuration for GitHub Pages hosting
+
 site_name: Ralph Orchestrator
-site_description: Alpha-quality AI orchestration using the Ralph Wiggum technique
+site_description: Hat-based orchestration framework that keeps AI agents in a loop until the task is done
 site_author: Ralph Orchestrator Contributors
 site_url: https://mikeyobrien.github.io/ralph-orchestrator/
 repo_url: https://github.com/mikeyobrien/ralph-orchestrator
@@ -12,104 +14,115 @@ theme:
   name: material
   favicon: assets/favicon.png
   logo: assets/logo.png
+  custom_dir: docs/overrides
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: indigo
-      accent: indigo
+      primary: deep purple
+      accent: amber
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: indigo
-      accent: indigo
+      primary: deep purple
+      accent: amber
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
   font:
-    text: Roboto
-    code: Roboto Mono
+    text: Inter
+    code: JetBrains Mono
   features:
-    - navigation.instant
-    - navigation.tracking
-    - navigation.tabs
-    - navigation.tabs.sticky
-    - navigation.sections
-    - navigation.expand
-    - navigation.path
-    - navigation.indexes
-    - navigation.top
-    - search.suggest
-    - search.highlight
-    - search.share
-    - header.autohide
-    - content.code.copy
-    - content.code.select
-    - content.code.annotate
+    - announce.dismiss
     - content.action.edit
     - content.action.view
+    - content.code.annotate
+    - content.code.copy
+    - content.code.select
     - content.tabs.link
+    - content.tooltips
+    - navigation.footer
+    - navigation.indexes
+    - navigation.instant
+    - navigation.instant.prefetch
+    - navigation.instant.progress
+    - navigation.sections
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.share
+    - search.suggest
     - toc.follow
 
-# Navigation
+# Navigation Structure
 nav:
-  - Home:
-    - index.md
-    - quick-start.md
-    - installation.md
+  - Home: index.md
+  - Getting Started:
+    - getting-started/index.md
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quick-start.md
+    - Your First Task: getting-started/first-task.md
+  - Concepts:
+    - concepts/index.md
+    - The Ralph Wiggum Technique: concepts/ralph-wiggum-technique.md
+    - The Six Tenets: concepts/tenets.md
+    - Hats & Events: concepts/hats-and-events.md
+    - Memories & Tasks: concepts/memories-and-tasks.md
+    - Backpressure: concepts/backpressure.md
   - User Guide:
-    - guide/overview.md
-    - guide/configuration.md
-    - guide/kiro-migration.md
-    - guide/agents.md
-    - guide/prompts.md
-    - guide/cost-management.md
-  - Deployment:
-    - deployment/docker.md
-    - deployment/kubernetes.md
-    - deployment/ci-cd.md
-    - deployment/production.md
+    - guide/index.md
+    - Configuration: guide/configuration.md
+    - Presets: guide/presets.md
+    - CLI Reference: guide/cli-reference.md
+    - Backends: guide/backends.md
+    - Writing Prompts: guide/prompts.md
+    - Cost Management: guide/cost-management.md
   - Advanced:
-    - advanced/architecture.md
-    - advanced/loop-detection.md
-    - advanced/security.md
-    - advanced/monitoring.md
-    - advanced/context-management.md
-    - advanced/production-deployment.md
+    - advanced/index.md
+    - Architecture: advanced/architecture.md
+    - Creating Custom Hats: advanced/custom-hats.md
+    - Event System Design: advanced/event-system.md
+    - Memory System: advanced/memory-system.md
+    - Task System: advanced/task-system.md
+    - Testing & Validation: advanced/testing.md
+    - Diagnostics: advanced/diagnostics.md
   - API Reference:
-    - api/orchestrator.md
-    - api/config.md
-    - api/agents.md
-    - api/metrics.md
-    - api/cli.md
-    - api/security.md
+    - api/index.md
+    - ralph-proto: api/ralph-proto.md
+    - ralph-core: api/ralph-core.md
+    - ralph-adapters: api/ralph-adapters.md
+    - ralph-tui: api/ralph-tui.md
+    - ralph-cli: api/ralph-cli.md
   - Examples:
     - examples/index.md
-    - examples/simple-task.md
-    - examples/web-api.md
-    - examples/cli-tool.md
-    - examples/data-analysis.md
-    - examples/bug-fix.md
-    - examples/documentation.md
-    - examples/testing.md
-  - Development:
-    - contributing.md
-    - testing.md
-    - changelog.md
-    - license.md
-  - Resources:
-    - troubleshooting.md
-    - faq.md
-    - glossary.md
-    - research.md
-    - 03-best-practices/best-practices.md
-    - 06-analysis/comparison-matrix.md
+    - Simple Task: examples/simple-task.md
+    - TDD Workflow: examples/tdd-workflow.md
+    - Spec-Driven Development: examples/spec-driven.md
+    - Multi-Hat Workflow: examples/multi-hat.md
+    - Debugging: examples/debugging.md
+  - Contributing:
+    - contributing/index.md
+    - Development Setup: contributing/setup.md
+    - Code Style: contributing/style.md
+    - Testing: contributing/testing.md
+    - Submitting PRs: contributing/pull-requests.md
+  - Reference:
+    - reference/index.md
+    - Changelog: reference/changelog.md
+    - FAQ: reference/faq.md
+    - Glossary: reference/glossary.md
+    - Migration from v1: reference/migration-v1.md
+    - Troubleshooting: reference/troubleshooting.md
 
 # Plugins
 plugins:
   - search:
-      separator: '[\s\-\.]+'
+      separator: '[\s\u200b\-_,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
+  - minify:
+      minify_html: true
 
 # Markdown Extensions
 markdown_extensions:
@@ -151,6 +164,7 @@ markdown_extensions:
           format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       alternate_style: true
+      combine_header_slug: true
   - pymdownx.tasklist:
       custom_checkbox: true
   - pymdownx.tilde
@@ -160,13 +174,9 @@ extra:
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/mikeyobrien/ralph-orchestrator
-    - icon: fontawesome/brands/twitter
-      link: https://twitter.com/mikeyobrien
   version:
     provider: mike
-  analytics:
-    provider: google
-    property: !ENV GOOGLE_ANALYTICS_KEY
+  generator: false
 
 # Copyright
-copyright: Copyright &copy; 2025 Ralph Orchestrator Contributors
+copyright: Copyright &copy; 2024-2026 Ralph Orchestrator Contributors

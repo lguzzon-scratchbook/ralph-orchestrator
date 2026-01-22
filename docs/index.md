@@ -2,122 +2,140 @@
 
 <div align="center">
 
-## Alpha-Quality AI Orchestration
+**Hat-based orchestration framework that keeps AI agents in a loop until the task is done.**
 
-*Put your AI agent in a loop until the task is done*
-
-[![Version](https://img.shields.io/badge/version-1.2.3-blue)](https://github.com/mikeyobrien/ralph-orchestrator/releases)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-920%2B%20passing-brightgreen)](tests/)
-[![Python](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue)](https://github.com/mikeyobrien/ralph-orchestrator/blob/main/LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.75+-orange)](https://www.rust-lang.org/)
+[![Build](https://img.shields.io/github/actions/workflow/status/mikeyobrien/ralph-orchestrator/ci.yml?branch=main&label=CI)](https://github.com/mikeyobrien/ralph-orchestrator/actions)
 
 > "Me fail English? That's unpossible!" - Ralph Wiggum
 
 </div>
 
-## What is Ralph Orchestrator?
+---
 
-Ralph Orchestrator is a functional, early-stage (alpha) implementation of the **Ralph Wiggum orchestration technique** - a simple but powerful pattern for autonomous AI task completion. As [Geoffrey Huntley](https://ghuntley.com/ralph/) originally defined it: **"Ralph is a Bash loop"** that continuously runs an AI agent against a prompt file until the task is marked as complete or limits are reached.
+## What is Ralph?
 
-Based on Huntley's technique, this implementation adds practical safety, monitoring, and cost controls for real-world usage. It works today, but expect rough edges and occasional breaking API/config changes between releases. For Claude Code users, also see the official [ralph-wiggum plugin](https://github.com/anthropics/claude-code/tree/main/plugins/ralph-wiggum).
+Ralph implements the [Ralph Wiggum technique](https://ghuntley.com/ralph/) — autonomous task completion through continuous iteration. Give Ralph a task, and it will keep working until it's done.
+
+> "The orchestrator is a thin coordination layer, not a platform. Ralph is smart; let Ralph do the work."
+
+### Two Modes of Operation
+
+| Mode | Description | Best For |
+|------|-------------|----------|
+| **Traditional** | Simple loop — Ralph iterates until done | Quick tasks, simple automation |
+| **Hat-Based** | Specialized personas coordinate through events | Complex workflows, multi-step processes |
 
 ## Key Features
 
 <div class="grid cards" markdown>
 
-- **🤖 Multi-Agent Support**
-  Works seamlessly with Claude, Q Chat, Gemini CLI, and ACP-compliant agents with automatic detection
+-   :material-robot: **Multi-Backend Support**
 
-- **💰 Cost Management**  
-  Real-time token tracking, cost calculation, and configurable spending limits
+    Works with Claude Code, Kiro, Gemini CLI, Codex, Amp, Copilot CLI, and OpenCode
 
-- **🔒 Security Controls**  
-  Input sanitization, command injection prevention, and path traversal protection
+-   :material-hat-fedora: **Hat System**
 
-- **📊 Monitoring & Metrics**  
-  System metrics, performance tracking, and detailed JSON exports
+    Specialized Ralph personas with distinct behaviors coordinating through typed events
 
-- **🔄 Resilient Execution**  
-  Automatic retries, circuit breakers, and state persistence
+-   :material-shield-check: **Backpressure Enforcement**
 
-- **💾 Git Checkpointing**
-  Version control integration for state recovery and history tracking
+    Gates that reject incomplete work — tests, lint, typecheck must pass
 
-- **🔌 ACP Protocol Support**
-  Full Agent Client Protocol integration with permission handling, file/terminal operations, and session management
+-   :material-brain: **Memories & Tasks**
+
+    Persistent learning across sessions and runtime work tracking
+
+-   :material-monitor: **Interactive TUI**
+
+    Real-time terminal UI for monitoring Ralph's activity
+
+-   :material-cog: **31 Presets**
+
+    Pre-configured workflows for TDD, spec-driven development, debugging, and more
 
 </div>
 
 ## Quick Example
 
 ```bash
-# 1. Create a task prompt
-cat > PROMPT.md << EOF
-Create a Python function that calculates the Fibonacci sequence.
-Include proper documentation and unit tests.
-The orchestrator will iterate until the function is complete.
+# Initialize with traditional mode
+ralph init --backend claude
+
+# Create a task
+cat > PROMPT.md << 'EOF'
+Build a REST API with these endpoints:
+- POST /users - Create user
+- GET /users/:id - Get user by ID
+- PUT /users/:id - Update user
+
+Use Express.js with TypeScript.
 EOF
 
-# 2. Run Ralph
-python ralph_orchestrator.py --prompt PROMPT.md
-
-# 3. Ralph iterates until the task is done!
+# Run Ralph
+ralph run
 ```
 
-## Why Ralph Orchestrator?
+Ralph iterates until it outputs `LOOP_COMPLETE` or hits the iteration limit.
 
-### The Problem
-Modern AI agents are powerful but require supervision. They can lose context, make mistakes, or need multiple iterations to complete complex tasks. Manual supervision is time-consuming and error-prone.
+## The Ralph Tenets
 
-### The Solution
-Ralph Orchestrator automates the iteration loop while maintaining safety and control:
-
-- **Autonomous Operation**: Set it and forget it - Ralph handles the iterations
-- **Safety First**: Built-in limits prevent runaway costs and infinite loops
-- **Alpha-Quality**: Solid capabilities, with APIs/config still evolving
-- **Observable**: Detailed metrics and logging for debugging and optimization
-- **Recoverable**: Checkpoint system allows resuming from any point
-
-## Use Cases
-
-Ralph Orchestrator excels at:
-
-- **Code Generation**: Building features, fixing bugs, writing tests
-- **Documentation**: Creating comprehensive docs, API references, tutorials
-- **Data Processing**: ETL pipelines, data analysis, report generation
-- **Automation**: CI/CD setup, deployment scripts, infrastructure as code
-- **Research**: Information gathering, summarization, analysis
+1. **Fresh Context Is Reliability** — Each iteration clears context. Re-read specs, plan, code every cycle.
+2. **Backpressure Over Prescription** — Don't prescribe how; create gates that reject bad work.
+3. **The Plan Is Disposable** — Regeneration costs one planning loop. Cheap.
+4. **Disk Is State, Git Is Memory** — Files are the handoff mechanism.
+5. **Steer With Signals, Not Scripts** — Add signs, not scripts.
+6. **Let Ralph Ralph** — Sit *on* the loop, not *in* it.
 
 ## Getting Started
 
-Ready to put Ralph to work? Check out our [Quick Start Guide](quick-start.md) to get up and running in minutes.
+<div class="grid cards" markdown>
 
-## Operational Features
+-   :material-download: **[Installation](getting-started/installation.md)**
 
-Ralph Orchestrator focuses on safety, control, and observability with:
+    Install Ralph via npm, Homebrew, or Cargo
 
-- **Token & Cost Limits**: Prevent budget overruns
-- **Context Management**: Handle large prompts intelligently
-- **Security Controls**: Protect against malicious inputs
-- **Monitoring & Metrics**: Track performance and usage
-- **Error Recovery**: Graceful handling of failures
-- **State Persistence**: Resume interrupted tasks
+-   :material-rocket-launch: **[Quick Start](getting-started/quick-start.md)**
 
-Learn more in our [Deployment Guide (alpha)](advanced/production-deployment.md).
+    Get up and running in 5 minutes
 
-## Community & Support
+-   :material-book-open: **[Concepts](concepts/index.md)**
 
-- 📖 [Documentation](https://mikeyobrien.github.io/ralph-orchestrator/)
-- 🐛 [Issue Tracker](https://github.com/mikeyobrien/ralph-orchestrator/issues)
-- 💬 [Discussions](https://github.com/mikeyobrien/ralph-orchestrator/discussions)
-- 🤝 [Contributing Guide](contributing.md)
+    Understand hats, events, memories, and backpressure
+
+-   :material-cog: **[Configuration](guide/configuration.md)**
+
+    Configure Ralph for your workflow
+
+</div>
+
+## Architecture
+
+Ralph is organized as a Cargo workspace with seven crates:
+
+| Crate | Purpose |
+|-------|---------|
+| `ralph-proto` | Protocol types: Event, Hat, Topic |
+| `ralph-core` | Business logic: EventLoop, Config |
+| `ralph-adapters` | CLI backend integrations |
+| `ralph-tui` | Terminal UI with ratatui |
+| `ralph-cli` | Binary entry point |
+| `ralph-e2e` | End-to-end testing |
+| `ralph-bench` | Benchmarking |
+
+## Community
+
+- [GitHub Issues](https://github.com/mikeyobrien/ralph-orchestrator/issues) — Report bugs and request features
+- [GitHub Discussions](https://github.com/mikeyobrien/ralph-orchestrator/discussions) — Ask questions and share ideas
+- [Contributing Guide](contributing/index.md) — Help improve Ralph
 
 ## License
 
-Ralph Orchestrator is open source software [licensed as MIT](license.md).
+Ralph Orchestrator is open source software licensed under the [MIT License](https://github.com/mikeyobrien/ralph-orchestrator/blob/main/LICENSE).
 
 ---
 
 <div align="center">
-<i>Built with ❤️ by the Ralph Orchestrator community</i>
+<i>"I'm learnding!" - Ralph Wiggum</i>
 </div>
