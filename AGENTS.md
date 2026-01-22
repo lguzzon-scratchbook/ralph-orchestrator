@@ -10,7 +10,7 @@
 
 3. **The Plan Is Disposable** — Regeneration costs one planning loop. Cheap. Never fight to save a plan.
 
-4. **Disk Is State, Git Is Memory** — `.agent/scratchpad.md` is the handoff mechanism. No sophisticated coordination needed.
+4. **Disk Is State, Git Is Memory** — Memories (`.agent/memories.md`) and Tasks (`.agent/tasks.jsonl`) are the handoff mechanisms. No sophisticated coordination needed.
 
 5. **Steer With Signals, Not Scripts** — The codebase is the instruction manual. When Ralph fails a specific way, add a sign for next time. The prompts you start with won't be the prompts you end with.
 
@@ -33,9 +33,26 @@
 ## Tasks
 
 - Create code tasks in `tasks/` using `.code-task.md` extension
-- Use `/code-task-generator` to create structured task files from descriptions
-- Run tasks with `/code-assist tasks/<task-name>.code-task.md`
 - Tasks are self-contained implementation units with acceptance criteria
+
+### Memories and Tasks (Default Mode)
+
+Memories and tasks are enabled by default. Both must be enabled/disabled together:
+- **Memories** (`.agent/memories.md`) — Persistent learning across sessions
+- **Tasks** (`.agent/tasks.jsonl`) — Runtime work tracking
+
+When enabled (default):
+- Scratchpad is disabled
+- Tasks replace scratchpad for completion verification
+- Loop terminates when no open tasks + consecutive LOOP_COMPLETE
+
+To disable (legacy scratchpad mode):
+```yaml
+memories:
+  enabled: false
+tasks:
+  enabled: false
+```
 
 ## Build & Test
 
@@ -117,7 +134,7 @@ Use the `/tui-validate` skill to validate Terminal UI rendering. This applies **
 ```bash
 # 1. Start TUI in tmux
 tmux new-session -d -s ralph-test -x 100 -y 30
-tmux send-keys -t ralph-test "cargo run --bin ralph -- run --tui -c ralph.yml -p 'your prompt'" Enter
+tmux send-keys -t ralph-test "cargo run --bin ralph -- run -c ralph.yml -p 'your prompt'" Enter
 
 # 2. Wait for TUI to render
 sleep 3
@@ -144,6 +161,137 @@ brew install tmux                       # For live TUI capture
 - ✅ Creating documentation screenshots
 
 See `.claude/skills/tui-validate/SKILL.md` for full documentation.
+
+## E2E Testing
+
+The `ralph-e2e` crate validates Ralph's behavior against real AI backends. Use this before releases or after significant changes to ensure the orchestration loop works correctly.
+
+### Quick Start
+
+```bash
+# Run all tests for Claude backend
+cargo run -p ralph-e2e -- claude
+
+# Run all tests for all available backends
+cargo run -p ralph-e2e -- all
+
+# List available scenarios
+cargo run -p ralph-e2e -- --list
+
+# Fast mode (skip meta-Ralph analysis)
+cargo run -p ralph-e2e -- claude --skip-analysis
+
+# Debug mode (keep workspaces)
+cargo run -p ralph-e2e -- claude --keep-workspace --verbose
+```
+
+### Test Tiers
+
+| Tier | Focus | Scenarios |
+|------|-------|-----------|
+| 1 | Connectivity | Backend availability and auth |
+| 2 | Orchestration Loop | Single/multi iteration, completion |
+| 3 | Events | Event parsing, backpressure |
+| 4 | Capabilities | Tool use, streaming output |
+| 5 | Hat Collections | Hat workflows, event routing |
+| 6 | Memory System | Add, search, injection, persistence |
+| 7 | Error Handling | Timeout, max iterations, auth failures |
+
+### Reports
+
+Generated in `.e2e-tests/`:
+
+```bash
+.e2e-tests/
+├── report.md      # Agent-readable Markdown
+├── report.json    # Machine-readable JSON
+└── claude-connect/  # Test workspace (with --keep-workspace)
+```
+
+### When to Use
+
+- ✅ Before releases to validate all backends work
+- ✅ After changing core orchestration logic
+- ✅ After modifying event parsing or hat routing
+- ✅ When adding support for new backends
+
+### E2E Orchestration
+
+When using Ralph to orchestrate E2E test development, use the isolated config to avoid scratchpad pollution:
+
+```bash
+# E2E test development (uses .agent/e2e-scratchpad.md)
+ralph run -c ralph.e2e.yml -p "specs/e2e-test-fixes.spec.md"
+
+# Running E2E tests themselves (uses isolated workspaces)
+cargo run -p ralph-e2e -- claude
+```
+
+**Why separate scratchpads?**
+- E2E orchestrator: `.agent/e2e-scratchpad.md` (project root)
+- E2E test workspaces: `.e2e-tests/<scenario-id>/.agent/scratchpad.md` (isolated)
+- Main Ralph: `.agent/scratchpad.md` (project root)
+
+This prevents state pollution between the orchestrator and test workspaces.
+
+See `crates/ralph-e2e/README.md` for detailed documentation.
+
+## Diagnostics
+
+The diagnostics system captures complete visibility into Ralph's operation for debugging and analysis. It's opt-in via environment variable with zero overhead when disabled.
+
+### Enable Diagnostics
+
+```bash
+RALPH_DIAGNOSTICS=1 ralph run -p "your prompt"
+```
+
+### Output Location
+
+Diagnostics are written to timestamped session directories:
+
+```
+.ralph/diagnostics/
+└── 2024-01-21T08-45-30/           # ISO 8601 timestamp per session
+    ├── agent-output.jsonl          # Agent text, tool calls, tool results
+    ├── orchestration.jsonl         # Hat selection, events, backpressure
+    ├── trace.jsonl                 # All tracing logs with metadata
+    ├── performance.jsonl           # Timing, latency, token counts
+    └── errors.jsonl                # Parse errors, validation failures
+```
+
+### Reviewing Diagnostics with jq
+
+```bash
+# All agent text output
+jq 'select(.type == "text")' .ralph/diagnostics/*/agent-output.jsonl
+
+# All tool calls
+jq 'select(.type == "tool_call")' .ralph/diagnostics/*/agent-output.jsonl
+
+# Hat selection decisions
+jq 'select(.event.type == "hat_selected")' .ralph/diagnostics/*/orchestration.jsonl
+
+# All errors
+jq '.' .ralph/diagnostics/*/errors.jsonl
+
+# ERROR level trace logs
+jq 'select(.level == "ERROR")' .ralph/diagnostics/*/trace.jsonl
+```
+
+### Cleanup
+
+```bash
+ralph clean --diagnostics
+```
+
+### When to Use
+
+- ✅ Debugging why Ralph selected a particular hat
+- ✅ Understanding agent output flow and tool usage
+- ✅ Investigating backpressure triggers
+- ✅ Analyzing performance bottlenecks
+- ✅ Post-mortem on failed orchestration runs
 
 ## PR Demos
 

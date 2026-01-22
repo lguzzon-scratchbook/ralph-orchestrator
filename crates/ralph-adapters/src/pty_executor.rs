@@ -78,6 +78,10 @@ pub struct PtyConfig {
     pub cols: u16,
     /// Terminal height.
     pub rows: u16,
+    /// Workspace root directory for command execution.
+    /// This is captured at startup to avoid `current_dir()` failures when the
+    /// working directory no longer exists (e.g., in E2E test workspaces).
+    pub workspace_root: std::path::PathBuf,
 }
 
 impl Default for PtyConfig {
@@ -87,6 +91,8 @@ impl Default for PtyConfig {
             idle_timeout_secs: 30,
             cols: 80,
             rows: 24,
+            workspace_root: std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from(".")),
         }
     }
 }
@@ -108,6 +114,12 @@ impl PtyConfig {
             rows,
             ..Default::default()
         }
+    }
+
+    /// Sets the workspace root directory.
+    pub fn with_workspace_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.workspace_root = root.into();
+        self
     }
 }
 
@@ -262,10 +274,9 @@ impl PtyExecutor {
         let mut cmd_builder = CommandBuilder::new(&cmd);
         cmd_builder.args(&args);
 
-        // Set explicit working directory
-        let cwd = std::env::current_dir()
-            .map_err(|e| io::Error::other(format!("Failed to get current directory: {}", e)))?;
-        cmd_builder.cwd(&cwd);
+        // Set explicit working directory from config (captured at startup to avoid
+        // current_dir() failures when workspace no longer exists)
+        cmd_builder.cwd(&self.config.workspace_root);
 
         // Set up environment for PTY
         cmd_builder.env("TERM", "xterm-256color");

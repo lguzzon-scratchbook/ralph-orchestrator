@@ -42,7 +42,6 @@ env/
 # Ralph specific
 .ralph/
 .sop/
-.agent/
 .logs/
 prompts/
 prompts/archive/
@@ -55,6 +54,7 @@ htmlcov/
 .pytest_cache/
 .tox/
 tui-validation/
+.e2e-tests/
 
 # Documentation
 docs/_build/site/

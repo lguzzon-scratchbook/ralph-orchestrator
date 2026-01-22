@@ -1,5 +1,8 @@
-Implement ALL of the remaining work for the tui-integration tests.  
+prepare for a 2.2.0 releaae.
 
-- You MUST implement tier 2 and tier 3. 
-- You can RUN "claude -p", claude is authenticated through the subcscriptions
-- You MUST fix any issues you uncover to make the tests pass.
+validate functionality, documentation is up to date, etc.
+
+IMPORTANT:
+you must validate with real manual tests.
+once everything is complete commit and pr. do not include ephemeral files.
+you must perform a comprehensive documentation review and update.

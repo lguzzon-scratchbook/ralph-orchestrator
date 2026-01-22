@@ -113,6 +113,14 @@ pub struct RalphConfig {
     /// TUI configuration.
     #[serde(default)]
     pub tui: TuiConfig,
+
+    /// Memories configuration for persistent learning across sessions.
+    #[serde(default)]
+    pub memories: MemoriesConfig,
+
+    /// Tasks configuration for runtime work tracking.
+    #[serde(default)]
+    pub tasks: TasksConfig,
 }
 
 fn default_true() -> bool {
@@ -148,6 +156,10 @@ impl Default for RalphConfig {
             suppress_warnings: false,
             // TUI
             tui: TuiConfig::default(),
+            // Memories
+            memories: MemoriesConfig::default(),
+            // Tasks
+            tasks: TasksConfig::default(),
         }
     }
 }
@@ -574,6 +586,15 @@ pub struct CoreConfig {
     /// Per spec: These are always present regardless of hat.
     #[serde(default = "default_guardrails")]
     pub guardrails: Vec<String>,
+
+    /// Root directory for workspace-relative paths (.agent/, memories, etc.).
+    ///
+    /// All relative paths (scratchpad, specs_dir, memories) are resolved relative
+    /// to this directory. Defaults to the current working directory.
+    ///
+    /// This is especially important for E2E tests that run in isolated workspaces.
+    #[serde(skip)]
+    pub workspace_root: std::path::PathBuf,
 }
 
 fn default_scratchpad() -> String {
@@ -598,6 +619,34 @@ impl Default for CoreConfig {
             scratchpad: default_scratchpad(),
             specs_dir: default_specs_dir(),
             guardrails: default_guardrails(),
+            workspace_root: std::env::var("RALPH_WORKSPACE_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                }),
+        }
+    }
+}
+
+impl CoreConfig {
+    /// Sets the workspace root for resolving relative paths.
+    ///
+    /// This is used by E2E tests to point to their isolated test workspace.
+    pub fn with_workspace_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.workspace_root = root.into();
+        self
+    }
+
+    /// Resolves a relative path against the workspace root.
+    ///
+    /// If the path is already absolute, it is returned as-is.
+    /// Otherwise, it is joined with the workspace root.
+    pub fn resolve_path(&self, relative: &str) -> std::path::PathBuf {
+        let path = std::path::Path::new(relative);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.workspace_root.join(path)
         }
     }
 }
@@ -674,6 +723,127 @@ pub struct TuiConfig {
     /// Prefix key combination (e.g., "ctrl-a", "ctrl-b").
     #[serde(default = "default_prefix_key")]
     pub prefix_key: String,
+}
+
+/// Memory injection mode.
+///
+/// Controls how memories are injected into agent context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InjectMode {
+    /// Ralph automatically injects memories at the start of each iteration.
+    #[default]
+    Auto,
+    /// Agent must explicitly run `ralph memory search` to access memories.
+    Manual,
+    /// Memories feature is disabled.
+    None,
+}
+
+impl std::fmt::Display for InjectMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => write!(f, "auto"),
+            Self::Manual => write!(f, "manual"),
+            Self::None => write!(f, "none"),
+        }
+    }
+}
+
+/// Memories configuration.
+///
+/// Controls the persistent learning system that allows Ralph to accumulate
+/// wisdom across sessions. Memories are stored in `.agent/memories.md`.
+///
+/// When enabled, the memories skill is automatically injected to teach
+/// agents how to create and search memories (skill injection is implicit).
+///
+/// Example configuration:
+/// ```yaml
+/// memories:
+///   enabled: true
+///   inject: auto
+///   budget: 2000
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoriesConfig {
+    /// Whether the memories feature is enabled.
+    ///
+    /// When true, memories are injected and the skill is taught to the agent.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// How memories are injected into agent context.
+    #[serde(default)]
+    pub inject: InjectMode,
+
+    /// Maximum tokens to inject (0 = unlimited).
+    ///
+    /// When set, memories are truncated to fit within this budget.
+    #[serde(default)]
+    pub budget: usize,
+
+    /// Filter configuration for memory injection.
+    #[serde(default)]
+    pub filter: MemoriesFilter,
+}
+
+impl Default for MemoriesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true, // Memories enabled by default
+            inject: InjectMode::Auto,
+            budget: 0,
+            filter: MemoriesFilter::default(),
+        }
+    }
+}
+
+/// Filter configuration for memory injection.
+///
+/// Controls which memories are included when priming context.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoriesFilter {
+    /// Filter by memory types (empty = all types).
+    #[serde(default)]
+    pub types: Vec<String>,
+
+    /// Filter by tags (empty = all tags).
+    #[serde(default)]
+    pub tags: Vec<String>,
+
+    /// Only include memories from the last N days (0 = no time limit).
+    #[serde(default)]
+    pub recent: u32,
+}
+
+/// Tasks configuration.
+///
+/// Controls the runtime task tracking system that allows Ralph to manage
+/// work items across iterations. Tasks are stored in `.agent/tasks.jsonl`.
+///
+/// When enabled, tasks replace scratchpad for loop completion verification.
+///
+/// Example configuration:
+/// ```yaml
+/// tasks:
+///   enabled: true
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TasksConfig {
+    /// Whether the tasks feature is enabled.
+    ///
+    /// When true, tasks are used for loop completion verification.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for TasksConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true, // Tasks enabled by default
+        }
+    }
 }
 
 fn default_prefix_key() -> String {

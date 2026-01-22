@@ -2,16 +2,24 @@
 //!
 //! The event loop coordinates the execution of hats via pub/sub messaging.
 
-use crate::config::{HatBackend, RalphConfig};
+use crate::config::{HatBackend, InjectMode, RalphConfig};
 use crate::event_parser::EventParser;
 use crate::event_reader::EventReader;
 use crate::hat_registry::HatRegistry;
 use crate::hatless_ralph::HatlessRalph;
 use crate::instructions::InstructionBuilder;
+use crate::memory_store::{MarkdownMemoryStore, format_memories_as_markdown, truncate_to_budget};
 use ralph_proto::{Event, EventBus, Hat, HatId};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
+
+/// Skill content injected when memories are enabled.
+///
+/// This teaches the agent how to read and create memories.
+/// Skill injection is implicit when `memories.enabled: true`.
+/// Embedded from `.claude/skills/ralph-memories/SKILL.md` at compile time.
+const MEMORIES_SKILL: &str = include_str!("../../../.claude/skills/ralph-memories/SKILL.md");
 
 /// Reason the event loop terminated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,11 +162,31 @@ pub struct EventLoop {
     instruction_builder: InstructionBuilder,
     ralph: HatlessRalph,
     event_reader: EventReader,
+    diagnostics: crate::diagnostics::DiagnosticsCollector,
 }
 
 impl EventLoop {
     /// Creates a new event loop from configuration.
     pub fn new(config: RalphConfig) -> Self {
+        // Try to create diagnostics collector, but fall back to disabled if it fails
+        // (e.g., in tests without proper directory setup)
+        let diagnostics = crate::diagnostics::DiagnosticsCollector::new(std::path::Path::new("."))
+            .unwrap_or_else(|e| {
+                debug!(
+                    "Failed to initialize diagnostics: {}, using disabled collector",
+                    e
+                );
+                crate::diagnostics::DiagnosticsCollector::disabled()
+            });
+
+        Self::with_diagnostics(config, diagnostics)
+    }
+
+    /// Creates a new event loop with explicit diagnostics collector (for testing).
+    pub fn with_diagnostics(
+        config: RalphConfig,
+        diagnostics: crate::diagnostics::DiagnosticsCollector,
+    ) -> Self {
         let registry = HatRegistry::from_config(&config);
         let instruction_builder = InstructionBuilder::with_events(
             &config.event_loop.completion_promise,
@@ -189,12 +217,14 @@ impl EventLoop {
             );
         }
 
+        // When memories are enabled, scratchpad instructions are excluded (mutually exclusive)
         let ralph = HatlessRalph::new(
             config.event_loop.completion_promise.clone(),
             config.core.clone(),
             &registry,
             config.event_loop.starting_event.clone(),
-        );
+        )
+        .with_scratchpad(!config.memories.enabled);
 
         // Read events path from marker file, fall back to default if not present
         // The marker file is written by run_loop_impl() at run startup
@@ -211,6 +241,7 @@ impl EventLoop {
             instruction_builder,
             ralph,
             event_reader,
+            diagnostics,
         }
     }
 
@@ -406,6 +437,9 @@ impl EventLoop {
     /// When in multi-hat mode, this method collects ALL pending events across all hats
     /// and builds Ralph's prompt with that context. The `## HATS` section in Ralph's
     /// prompt documents the topology for coordination awareness.
+    ///
+    /// If memories are configured with `inject: auto`, this method also prepends
+    /// primed memories to the prompt context.
     pub fn build_prompt(&mut self, hat_id: &HatId) -> Option<String> {
         // Handle "ralph" hat - the constant coordinator
         // Per spec: "Hatless Ralph is constant — Cannot be replaced, overwritten, or configured away"
@@ -419,8 +453,12 @@ impl EventLoop {
                     .collect::<Vec<_>>()
                     .join("\n");
 
+                // Build base prompt and prepend memories if enabled
+                let base_prompt = self.ralph.build_prompt(&events_context, &[]);
+                let final_prompt = self.prepend_memories(base_prompt);
+
                 debug!("build_prompt: routing to HatlessRalph (solo mode)");
-                return Some(self.ralph.build_prompt(&events_context, &[]));
+                return Some(final_prompt);
             } else {
                 // Multi-hat mode: collect events and determine active hats
                 let mut all_hat_ids: Vec<HatId> = self.bus.hat_ids().cloned().collect();
@@ -467,6 +505,10 @@ impl EventLoop {
                     .collect::<Vec<_>>()
                     .join("\n");
 
+                // Build base prompt and prepend memories if enabled
+                let base_prompt = self.ralph.build_prompt(&events_context, &active_hats);
+                let final_prompt = self.prepend_memories(base_prompt);
+
                 // Build prompt with active hats - filters instructions to only active hats
                 debug!(
                     "build_prompt: routing to HatlessRalph (multi-hat coordinator mode), active_hats: {:?}",
@@ -475,7 +517,7 @@ impl EventLoop {
                         .map(|h| h.id.as_str())
                         .collect::<Vec<_>>()
                 );
-                return Some(self.ralph.build_prompt(&events_context, &active_hats));
+                return Some(final_prompt);
             }
         }
 
@@ -507,6 +549,91 @@ impl EventLoop {
             self.instruction_builder
                 .build_custom_hat(hat, &events_context),
         )
+    }
+
+    /// Prepends memories and usage skill to the prompt if auto-injection is enabled.
+    ///
+    /// Per spec: When `memories.inject: auto` is configured, memories are loaded
+    /// from `.agent/memories.md` and prepended to every prompt.
+    fn prepend_memories(&self, prompt: String) -> String {
+        let memories_config = &self.config.memories;
+
+        info!(
+            "Memory injection check: enabled={}, inject={:?}, workspace_root={:?}",
+            memories_config.enabled, memories_config.inject, self.config.core.workspace_root
+        );
+
+        // Only inject if enabled and set to auto mode
+        if !memories_config.enabled || memories_config.inject != InjectMode::Auto {
+            info!(
+                "Memory injection skipped: enabled={}, inject={:?}",
+                memories_config.enabled, memories_config.inject
+            );
+            return prompt;
+        }
+
+        // Load memories from the store using workspace root for path resolution
+        let workspace_root = &self.config.core.workspace_root;
+        let store = MarkdownMemoryStore::with_default_path(workspace_root);
+        let memories_path = workspace_root.join(".agent/memories.md");
+
+        info!(
+            "Looking for memories at: {:?} (exists: {})",
+            memories_path,
+            memories_path.exists()
+        );
+
+        let memories = match store.load() {
+            Ok(memories) => {
+                info!("Successfully loaded {} memories from store", memories.len());
+                memories
+            }
+            Err(e) => {
+                info!(
+                    "Failed to load memories for injection: {} (path: {:?})",
+                    e, memories_path
+                );
+                return prompt;
+            }
+        };
+
+        if memories.is_empty() {
+            info!("Memory store is empty - no memories to inject");
+            return prompt;
+        }
+
+        // Format memories as markdown
+        let mut memories_content = format_memories_as_markdown(&memories);
+
+        // Apply budget if configured
+        if memories_config.budget > 0 {
+            let original_len = memories_content.len();
+            memories_content = truncate_to_budget(&memories_content, memories_config.budget);
+            debug!(
+                "Applied budget: {} chars -> {} chars (budget: {})",
+                original_len,
+                memories_content.len(),
+                memories_config.budget
+            );
+        }
+
+        info!(
+            "Injecting {} memories ({} chars) into prompt",
+            memories.len(),
+            memories_content.len()
+        );
+
+        // Build final prompt with memories prefix
+        let mut final_prompt = memories_content;
+
+        // Always add usage skill when memories are enabled (implicit skill injection)
+        final_prompt.push_str(MEMORIES_SKILL);
+        debug!("Added memory usage skill to prompt");
+
+        final_prompt.push_str("\n\n");
+        final_prompt.push_str(&prompt);
+
+        final_prompt
     }
 
     /// Builds the Ralph prompt (coordination mode).
@@ -667,6 +794,23 @@ impl EventLoop {
         self.state.iteration += 1;
         self.state.last_hat = Some(hat_id.clone());
 
+        // Log iteration started
+        self.diagnostics.log_orchestration(
+            self.state.iteration,
+            "loop",
+            crate::diagnostics::OrchestrationEvent::IterationStarted,
+        );
+
+        // Log hat selected
+        self.diagnostics.log_orchestration(
+            self.state.iteration,
+            "loop",
+            crate::diagnostics::OrchestrationEvent::HatSelected {
+                hat: hat_id.to_string(),
+                reason: "process_output".to_string(),
+            },
+        );
+
         // Track failures
         if success {
             self.state.consecutive_failures = 0;
@@ -676,11 +820,17 @@ impl EventLoop {
 
         // Check for completion promise - only valid from Ralph (the coordinator)
         // Per spec: Requires dual condition (task state + consecutive confirmation)
+        // When memories are enabled, verify tasks instead of scratchpad
         if hat_id.as_str() == "ralph"
             && EventParser::contains_promise(output, &self.config.event_loop.completion_promise)
         {
-            // Verify scratchpad task state
-            match self.verify_scratchpad_complete() {
+            let verification_result = if self.config.memories.enabled {
+                self.verify_tasks_complete()
+            } else {
+                self.verify_scratchpad_complete()
+            };
+
+            match verification_result {
                 Ok(true) => {
                     // All tasks complete - increment confirmation counter
                     self.state.completion_confirmations += 1;
@@ -691,6 +841,16 @@ impl EventLoop {
                             confirmations = self.state.completion_confirmations,
                             "Completion confirmed on consecutive iterations - terminating"
                         );
+
+                        // Log loop terminated
+                        self.diagnostics.log_orchestration(
+                            self.state.iteration,
+                            "loop",
+                            crate::diagnostics::OrchestrationEvent::LoopTerminated {
+                                reason: "completion_promise".to_string(),
+                            },
+                        );
+
                         return Some(TerminationReason::CompletionPromise);
                     }
                     // First confirmation - continue to next iteration
@@ -737,6 +897,21 @@ impl EventLoop {
                             typecheck = evidence.typecheck_passed,
                             "build.done rejected: backpressure checks failed"
                         );
+
+                        // Log backpressure triggered
+                        self.diagnostics.log_orchestration(
+                            self.state.iteration,
+                            hat_id.as_str(),
+                            crate::diagnostics::OrchestrationEvent::BackpressureTriggered {
+                                reason: format!(
+                                    "backpressure checks failed: tests={}, lint={}, typecheck={}",
+                                    evidence.tests_passed,
+                                    evidence.lint_passed,
+                                    evidence.typecheck_passed
+                                ),
+                            },
+                        );
+
                         let blocked = Event::new(
                             "build.blocked",
                             "Backpressure checks failed. Fix tests/lint/typecheck before emitting build.done."
@@ -749,6 +924,16 @@ impl EventLoop {
                         hat = %hat_id.as_str(),
                         "build.done rejected: missing backpressure evidence"
                     );
+
+                    // Log backpressure triggered
+                    self.diagnostics.log_orchestration(
+                        self.state.iteration,
+                        hat_id.as_str(),
+                        crate::diagnostics::OrchestrationEvent::BackpressureTriggered {
+                            reason: "missing backpressure evidence".to_string(),
+                        },
+                    );
+
                     let blocked = Event::new(
                         "build.blocked",
                         "Missing backpressure evidence. Include 'tests: pass', 'lint: pass', 'typecheck: pass' in build.done payload."
@@ -792,6 +977,18 @@ impl EventLoop {
                 );
 
                 self.state.abandoned_tasks.push(task_id.clone());
+
+                // Log task abandoned
+                self.diagnostics.log_orchestration(
+                    self.state.iteration,
+                    hat_id.as_str(),
+                    crate::diagnostics::OrchestrationEvent::TaskAbandoned {
+                        reason: format!(
+                            "3 consecutive build.blocked events for task '{}'",
+                            task_id
+                        ),
+                    },
+                );
 
                 let abandoned_event = Event::new(
                     "build.task.abandoned",
@@ -854,6 +1051,16 @@ impl EventLoop {
                 "Publishing event from output"
             );
             let topic = event.topic.clone();
+
+            // Log event published
+            self.diagnostics.log_orchestration(
+                self.state.iteration,
+                hat_id.as_str(),
+                crate::diagnostics::OrchestrationEvent::EventPublished {
+                    topic: topic.to_string(),
+                },
+            );
+
             let recipients = self.bus.publish(event);
 
             // Per spec: "Unknown topic → Log warning, event dropped"
@@ -911,6 +1118,21 @@ impl EventLoop {
             .any(|line| line.trim_start().starts_with("- [ ]"));
 
         Ok(!has_pending)
+    }
+
+    fn verify_tasks_complete(&self) -> Result<bool, std::io::Error> {
+        use crate::task_store::TaskStore;
+        use std::path::Path;
+
+        let tasks_path = Path::new(".agent").join("tasks.jsonl");
+
+        // No tasks file = no pending tasks = complete
+        if !tasks_path.exists() {
+            return Ok(true);
+        }
+
+        let store = TaskStore::load(&tasks_path)?;
+        Ok(!store.has_open_tasks())
     }
 
     /// Processes events from JSONL and routes orphaned events to Ralph.
@@ -1221,22 +1443,23 @@ event_loop:
         use std::fs;
         use tempfile::TempDir;
 
-        let config = RalphConfig::default();
-        let mut event_loop = EventLoop::new(config);
-
-        // Use a per-test scratchpad path (tests run in parallel).
         let temp_dir = TempDir::new().unwrap();
-        let scratchpad_path = temp_dir.path().join("scratchpad.md");
-        event_loop.config.core.scratchpad = scratchpad_path.to_string_lossy().to_string();
 
-        event_loop.initialize("Test");
-
-        // Create scratchpad with all tasks completed
+        // Create scratchpad with all tasks completed (use absolute path, no set_current_dir)
+        let agent_dir = temp_dir.path().join(".agent");
+        fs::create_dir_all(&agent_dir).unwrap();
+        let scratchpad_path = agent_dir.join("scratchpad.md");
         fs::write(
             &scratchpad_path,
             "## Tasks\n- [x] Task 1 done\n- [x] Task 2 done\n",
         )
         .unwrap();
+
+        // Configure event loop to use temp directory scratchpad
+        let mut config = RalphConfig::default();
+        config.core.scratchpad = scratchpad_path.to_string_lossy().to_string();
+        let mut event_loop = EventLoop::new(config);
+        event_loop.initialize("Test");
 
         // Use Ralph since it's the coordinator that outputs completion promise
         let hat_id = HatId::new("ralph");
@@ -1301,8 +1524,8 @@ hats:
             "Planner prompt should have guardrails section"
         );
         assert!(
-            planner_prompt.contains("Fresh context each iteration"),
-            "Planner prompt should have ghuntley identity"
+            planner_prompt.contains("You have fresh context each iteration"),
+            "Planner prompt should have RFC2119 identity"
         );
 
         // Now trigger builder hat by publishing build.task event
@@ -1313,14 +1536,14 @@ hats:
 
         let builder_prompt = event_loop.build_prompt(&hat_id).unwrap();
 
-        // Verify ghuntley-style structure for builder too
+        // Verify RFC2119-style structure for builder too
         assert!(
             builder_prompt.contains("### 0. ORIENTATION"),
-            "Builder should use ghuntley-style orientation phase"
+            "Builder should use RFC2119-style orientation phase"
         );
         assert!(
-            builder_prompt.contains("Only 1 subagent for build/tests"),
-            "Builder prompt should have subagent limit"
+            builder_prompt.contains("You MUST NOT use more than 1 subagent for build/tests"),
+            "Builder prompt should have subagent limit with MUST NOT"
         );
     }
 
@@ -1758,6 +1981,20 @@ hats:
         use std::fs;
         use tempfile::TempDir;
 
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create scratchpad with completed and cancelled tasks (use absolute path, no set_current_dir)
+        let agent_dir = temp_dir.path().join(".agent");
+        fs::create_dir_all(&agent_dir).unwrap();
+        let scratchpad_path = agent_dir.join("scratchpad.md");
+        let scratchpad_content = r"## Tasks
+- [x] Core feature implemented
+- [x] Tests added
+- [~] Documentation update (cancelled: out of scope)
+- [~] Performance optimization (cancelled: not needed)
+";
+        fs::write(&scratchpad_path, scratchpad_content).unwrap();
+
         // Test that cancelled tasks don't block completion when all other tasks are done
         let yaml = r#"
 hats:
@@ -1766,25 +2003,13 @@ hats:
     triggers: ["build.task"]
     publishes: ["build.done"]
 "#;
-        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let mut config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        config.core.scratchpad = scratchpad_path.to_string_lossy().to_string();
         let mut event_loop = EventLoop::new(config);
         event_loop.initialize("Test task");
 
         // Ralph handles task.start, not a specific hat
         let ralph_id = HatId::new("ralph");
-
-        // Create scratchpad with completed and cancelled tasks
-        let temp_dir = TempDir::new().unwrap();
-        let scratchpad_path = temp_dir.path().join("scratchpad.md");
-        event_loop.config.core.scratchpad = scratchpad_path.to_string_lossy().to_string();
-
-        let scratchpad_content = r"## Tasks
-- [x] Core feature implemented
-- [x] Tests added
-- [~] Documentation update (cancelled: out of scope)
-- [~] Performance optimization (cancelled: not needed)
-";
-        fs::write(&scratchpad_path, scratchpad_content).unwrap();
 
         // Simulate completion with some cancelled tasks
         let output = "All done! LOOP_COMPLETE";
@@ -2118,10 +2343,10 @@ hats:
         assert!(prompt.is_some(), "Should build prompt for ralph");
         let prompt = prompt.unwrap();
 
-        // Should contain ghuntley-style Ralph identity (uses "I'm Ralph" not "You are Ralph")
+        // Should contain RFC2119-style Ralph identity (uses "You are Ralph")
         assert!(
-            prompt.contains("I'm Ralph"),
-            "Should identify as Ralph with ghuntley style"
+            prompt.contains("You are Ralph"),
+            "Should identify as Ralph with RFC2119 style"
         );
         assert!(
             prompt.contains("## WORKFLOW"),

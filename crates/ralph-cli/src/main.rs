@@ -8,11 +8,16 @@
 //! - Entry point to the headless orchestration loop
 //! - Event history viewing via `ralph events`
 //! - Project initialization via `ralph init`
-//! - SOP-based planning via `ralph plan` and `ralph task`
+//! - SOP-based planning via `ralph plan`
+//! - Code task generation via `ralph code-task`
+//! - Work item tracking via `ralph task`
 
 mod init;
+mod memory;
 mod presets;
 mod sop_runner;
+mod task_cli;
+mod tools;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -222,14 +227,20 @@ enum Commands {
     /// Clean up Ralph artifacts (.agent/ directory)
     Clean(CleanArgs),
 
-    /// Emit an event to .agent/events.jsonl with proper JSON formatting
+    /// Emit an event to the current run's events file with proper JSON formatting
     Emit(EmitArgs),
 
     /// Start a Prompt-Driven Development planning session
     Plan(PlanArgs),
 
     /// Generate code task files from descriptions or plans
-    Task(TaskArgs),
+    CodeTask(CodeTaskArgs),
+
+    /// Create code tasks (alias for code-task)
+    Task(CodeTaskArgs),
+
+    /// Ralph's runtime tools (agent-facing)
+    Tools(tools::ToolsArgs),
 }
 
 /// Arguments for the init subcommand.
@@ -286,13 +297,13 @@ struct RunArgs {
     // ─────────────────────────────────────────────────────────────────────────
     // Execution Mode Options
     // ─────────────────────────────────────────────────────────────────────────
-    /// Enable TUI observation mode for real-time monitoring
+    /// Disable TUI observation mode (TUI is enabled by default)
     #[arg(long, conflicts_with = "autonomous")]
-    tui: bool,
+    no_tui: bool,
 
     /// Force autonomous mode (headless, non-interactive).
     /// Overrides default_mode from config.
-    #[arg(short, long, conflicts_with = "tui")]
+    #[arg(short, long, conflicts_with = "no_tui")]
     autonomous: bool,
 
     /// Idle timeout in seconds for interactive mode (default: 30).
@@ -327,12 +338,12 @@ struct ResumeArgs {
     #[arg(long)]
     max_iterations: Option<u32>,
 
-    /// Enable TUI observation mode for real-time monitoring
+    /// Disable TUI observation mode (TUI is enabled by default)
     #[arg(long, conflicts_with = "autonomous")]
-    tui: bool,
+    no_tui: bool,
 
     /// Force autonomous mode
-    #[arg(short, long, conflicts_with = "tui")]
+    #[arg(short, long, conflicts_with = "no_tui")]
     autonomous: bool,
 
     /// Idle timeout in seconds for TUI mode
@@ -386,6 +397,10 @@ struct CleanArgs {
     /// Preview what would be deleted without actually deleting
     #[arg(long)]
     dry_run: bool,
+
+    /// Clean diagnostic logs instead of .agent directory
+    #[arg(long)]
+    diagnostics: bool,
 }
 
 /// Arguments for the emit subcommand.
@@ -433,7 +448,7 @@ struct PlanArgs {
 /// This is a thin wrapper that spawns the AI backend with the bundled
 /// code-task-generator SOP, bypassing Ralph's event loop entirely.
 #[derive(Parser, Debug)]
-struct TaskArgs {
+struct CodeTaskArgs {
     /// Input: description text or path to PDD plan file
     #[arg(value_name = "INPUT")]
     input: Option<String>,
@@ -452,31 +467,95 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Detect if TUI mode is requested - TUI owns the terminal, so logs must not go to stdout
+    // TUI is enabled by default unless --no-tui is specified or --autonomous is used
     let tui_enabled = match &cli.command {
-        Some(Commands::Run(args)) => args.tui,
-        Some(Commands::Resume(args)) => args.tui,
+        Some(Commands::Run(args)) => !args.no_tui && !args.autonomous,
+        Some(Commands::Resume(args)) => !args.no_tui && !args.autonomous,
         _ => false,
     };
 
     // Initialize logging - suppress in TUI mode to avoid corrupting the display
     let filter = if cli.verbose { "debug" } else { "info" };
+
+    // Check if diagnostics are enabled
+    let diagnostics_enabled = std::env::var("RALPH_DIAGNOSTICS")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
     if tui_enabled {
         // TUI mode: logs would corrupt the display, so we suppress them entirely.
         // For debugging TUI issues, set RALPH_DEBUG_LOG=1 to write to .agent/ralph.log
         if std::env::var("RALPH_DEBUG_LOG").is_ok() {
             let log_path = std::path::Path::new(".agent").join("ralph.log");
             if let Ok(file) = std::fs::File::create(&log_path) {
-                tracing_subscriber::fmt()
-                    .with_env_filter(filter)
-                    .with_writer(std::sync::Mutex::new(file))
-                    .with_ansi(false)
-                    .init();
+                if diagnostics_enabled {
+                    // TUI + diagnostics: logs to file + trace layer
+                    use ralph_core::diagnostics::DiagnosticTraceLayer;
+                    use tracing_subscriber::prelude::*;
+
+                    if let Ok(collector) = ralph_core::diagnostics::DiagnosticsCollector::new(
+                        std::path::Path::new("."),
+                    ) && let Some(session_dir) = collector.session_dir()
+                    {
+                        if let Ok(trace_layer) = DiagnosticTraceLayer::new(session_dir) {
+                            tracing_subscriber::registry()
+                                .with(
+                                    tracing_subscriber::fmt::layer()
+                                        .with_writer(std::sync::Mutex::new(file))
+                                        .with_ansi(false),
+                                )
+                                .with(tracing_subscriber::EnvFilter::new(filter))
+                                .with(trace_layer)
+                                .init();
+                        } else {
+                            // Fallback: just file logging
+                            tracing_subscriber::fmt()
+                                .with_env_filter(filter)
+                                .with_writer(std::sync::Mutex::new(file))
+                                .with_ansi(false)
+                                .init();
+                        }
+                    }
+                } else {
+                    // TUI without diagnostics: just file logging
+                    tracing_subscriber::fmt()
+                        .with_env_filter(filter)
+                        .with_writer(std::sync::Mutex::new(file))
+                        .with_ansi(false)
+                        .init();
+                }
             }
         }
         // If RALPH_DEBUG_LOG is not set or file creation fails, no logging (default)
     } else {
         // Normal mode: logs go to stdout
-        tracing_subscriber::fmt().with_env_filter(filter).init();
+        if diagnostics_enabled {
+            // Normal mode + diagnostics: stdout + trace layer
+            use ralph_core::diagnostics::DiagnosticTraceLayer;
+            use tracing_subscriber::prelude::*;
+
+            if let Ok(collector) =
+                ralph_core::diagnostics::DiagnosticsCollector::new(std::path::Path::new("."))
+                && let Some(session_dir) = collector.session_dir()
+            {
+                if let Ok(trace_layer) = DiagnosticTraceLayer::new(session_dir) {
+                    tracing_subscriber::registry()
+                        .with(tracing_subscriber::fmt::layer())
+                        .with(tracing_subscriber::EnvFilter::new(filter))
+                        .with(trace_layer)
+                        .init();
+                } else {
+                    // Fallback: just stdout
+                    tracing_subscriber::fmt().with_env_filter(filter).init();
+                }
+            } else {
+                // Fallback: just stdout
+                tracing_subscriber::fmt().with_env_filter(filter).init();
+            }
+        } else {
+            // Normal mode without diagnostics: just stdout
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+        }
     }
 
     match cli.command {
@@ -489,9 +568,11 @@ async fn main() -> Result<()> {
         Some(Commands::Clean(args)) => clean_command(cli.config, cli.color, args),
         Some(Commands::Emit(args)) => emit_command(cli.color, args),
         Some(Commands::Plan(args)) => plan_command(cli.config, cli.color, args),
-        Some(Commands::Task(args)) => task_command(cli.config, cli.color, args),
+        Some(Commands::CodeTask(args)) => code_task_command(cli.config, cli.color, args),
+        Some(Commands::Task(args)) => code_task_command(cli.config, cli.color, args),
+        Some(Commands::Tools(args)) => tools::execute(args, cli.color.should_use_colors()),
         None => {
-            // Default to run with no overrides (backwards compatibility)
+            // Default to run with TUI enabled (new default behavior)
             let args = RunArgs {
                 prompt_text: None,
                 prompt_file: None,
@@ -499,7 +580,7 @@ async fn main() -> Result<()> {
                 completion_promise: None,
                 dry_run: false,
                 continue_mode: false,
-                tui: false,
+                no_tui: false, // TUI enabled by default
                 autonomous: false,
                 idle_timeout: None,
                 verbose: false,
@@ -528,6 +609,12 @@ async fn run_command(
 
     // Normalize v1 flat fields into v2 nested structure
     config.normalize();
+
+    // Set workspace_root to current directory (critical for E2E tests in isolated workspaces).
+    // This must happen after config load because workspace_root has #[serde(skip)] and
+    // defaults to cwd at deserialize time - but we need it set to the actual runtime cwd.
+    config.core.workspace_root =
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
     // Handle --continue mode: check scratchpad exists before proceeding
     let resume = args.continue_mode;
@@ -566,9 +653,10 @@ async fn run_command(
     }
 
     // Apply execution mode overrides per spec
+    // TUI is enabled by default (unless --no-tui is specified)
     if args.autonomous {
         config.cli.default_mode = "autonomous".to_string();
-    } else if args.tui {
+    } else if !args.no_tui {
         config.cli.default_mode = "interactive".to_string();
     }
 
@@ -647,7 +735,8 @@ async fn run_command(
     }
 
     // Run the orchestration loop and exit with proper exit code
-    let enable_tui = args.tui;
+    // TUI is enabled by default (unless --no-tui or --autonomous is specified)
+    let enable_tui = !args.no_tui && !args.autonomous;
     let verbosity = Verbosity::resolve(verbose || args.verbose, args.quiet);
     let reason = run_loop_impl(
         config,
@@ -699,6 +788,10 @@ async fn resume_command(
 
     config.normalize();
 
+    // Set workspace_root to current directory (critical for E2E tests in isolated workspaces).
+    config.core.workspace_root =
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
     // Check that scratchpad exists (required for resume)
     let scratchpad_path = std::path::Path::new(&config.core.scratchpad);
     if !scratchpad_path.exists() {
@@ -723,9 +816,10 @@ async fn resume_command(
     }
 
     // Apply execution mode overrides
+    // TUI is enabled by default (unless --no-tui is specified)
     if args.autonomous {
         config.cli.default_mode = "autonomous".to_string();
-    } else if args.tui {
+    } else if !args.no_tui {
         config.cli.default_mode = "interactive".to_string();
     }
 
@@ -764,7 +858,8 @@ async fn resume_command(
     // Run the orchestration loop in resume mode
     // The key difference: we publish task.resume instead of task.start,
     // signaling the planner to read the existing scratchpad
-    let enable_tui = args.tui;
+    // TUI is enabled by default (unless --no-tui or --autonomous is specified)
+    let enable_tui = !args.no_tui && !args.autonomous;
     let verbosity = Verbosity::resolve(verbose || args.verbose, args.quiet);
     let reason = run_loop_impl(
         config,
@@ -949,6 +1044,13 @@ fn events_command(color_mode: ColorMode, args: EventsArgs) -> Result<()> {
 fn clean_command(config_path: PathBuf, color_mode: ColorMode, args: CleanArgs) -> Result<()> {
     let use_colors = color_mode.should_use_colors();
 
+    // If --diagnostics flag is set, clean diagnostics directory
+    if args.diagnostics {
+        let workspace_root = std::env::current_dir().context("Failed to get current directory")?;
+        return ralph_cli::clean_diagnostics(&workspace_root, use_colors, args.dry_run);
+    }
+
+    // Otherwise, clean .agent directory (existing behavior)
     // Load configuration
     let config = if config_path.exists() {
         RalphConfig::from_file(&config_path)
@@ -1031,11 +1133,14 @@ fn clean_command(config_path: PathBuf, color_mode: ColorMode, args: CleanArgs) -
     Ok(())
 }
 
-/// Emit an event to .agent/events.jsonl with proper JSON formatting.
+/// Emit an event to the current run's events file with proper JSON formatting.
 ///
 /// This command provides a deterministic way for agents to emit events without
 /// risking malformed JSONL from manual echo commands. All JSON serialization
 /// is handled via serde_json, ensuring proper escaping of payloads.
+///
+/// Events are written to the path specified in `.ralph/current-events` marker file
+/// (created by `ralph run`), or falls back to `.ralph/events.jsonl` if no marker exists.
 fn emit_command(color_mode: ColorMode, args: EmitArgs) -> Result<()> {
     let use_colors = color_mode.should_use_colors();
 
@@ -1148,7 +1253,11 @@ fn plan_command(config_path: PathBuf, color_mode: ColorMode, args: PlanArgs) -> 
 ///
 /// This is a thin wrapper that bypasses Ralph's event loop entirely.
 /// It spawns the AI backend with the bundled code-task-generator SOP.
-fn task_command(config_path: PathBuf, color_mode: ColorMode, args: TaskArgs) -> Result<()> {
+fn code_task_command(
+    config_path: PathBuf,
+    color_mode: ColorMode,
+    args: CodeTaskArgs,
+) -> Result<()> {
     use sop_runner::{Sop, SopRunConfig, SopRunError};
 
     let use_colors = color_mode.should_use_colors();
@@ -1641,6 +1750,7 @@ async fn run_loop_impl(
         let pty_config = PtyConfig {
             interactive: user_interactive,
             idle_timeout_secs,
+            workspace_root: config.core.workspace_root.clone(),
             ..PtyConfig::from_env()
         };
         Some(PtyExecutor::new(backend.clone(), pty_config))
@@ -1907,10 +2017,12 @@ async fn run_loop_impl(
         // TuiStreamHandler appear immediately in the TUI (real-time streaming).
         let tui_lines: Option<Arc<std::sync::Mutex<Vec<ratatui::text::Line<'static>>>>> =
             if let Some(ref state) = tui_state {
-                // Start new iteration and get handle to its lines buffer
+                // Start new iteration and get handle to the LATEST iteration's lines buffer.
+                // We must use latest_iteration_lines_handle() instead of current_iteration_lines_handle()
+                // because the user may be viewing an older iteration while a new one executes.
                 if let Ok(mut s) = state.lock() {
                     s.start_new_iteration();
-                    s.current_iteration_lines_handle()
+                    s.latest_iteration_lines_handle()
                 } else {
                     None
                 }
@@ -2126,6 +2238,7 @@ async fn execute_pty(
         let pty_config = PtyConfig {
             interactive,
             idle_timeout_secs,
+            workspace_root: config.core.workspace_root.clone(),
             ..PtyConfig::from_env()
         };
         temp_executor = PtyExecutor::new(backend.clone(), pty_config);
