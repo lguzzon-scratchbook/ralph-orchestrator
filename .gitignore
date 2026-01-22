@@ -55,6 +55,7 @@ htmlcov/
 .tox/
 tui-validation/
 .e2e-tests/
+coverage/
 
 # Documentation
 docs/_build/site/
@@ -65,3 +66,7 @@ PROMPT.md
 # But allow benchmark task prompts
 !bench/tasks/**/PROMPT.md
 .tmp-ralph-claude-code
+
+.agent/
+!.agent/memories.md
+!.agent/tasks.jsonl
